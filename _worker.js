@@ -1,4 +1,4 @@
-﻿const Version = '2026-11-10 23:26:46';
+﻿const Version = '2026-11-15 14:00:00';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
 const Pages静态页面 = 'https://edt-pages.github.io', EDT_版本号 = Number(String(Version).replace(/\D+/g, ''));
@@ -440,6 +440,11 @@ export default {
 								}
 								if (isLoonOrSurge) 完整节点路径 = 完整节点路径.replace(/,/g, '%2C');
 
+								if (协议类型 === 'vmess') {
+									const 传输路径参数值 = 获取传输路径参数值(config_JSON, 完整节点路径, 作为优选订阅生成器);
+									return 构造VMess链接({ 地址: 节点地址, 端口: 节点端口, UUID: config_JSON.UUID, 备注: 节点备注, 传输协议, 路径: 传输路径参数值, 主机名: config_JSON.HOST, TLS: true, SNI: config_JSON.HOST, ALPN: config_JSON.ALPN, 指纹: config_JSON.Fingerprint });
+								}
+
 								if (协议类型 === 'ss' && !作为优选订阅生成器) {
 									if (!config_JSON.SS.TLS) {
 										const TLS端口 = [443, 2053, 2083, 2087, 2096, 8443];
@@ -603,7 +608,7 @@ async function 处理叉HTTP请求(request, yourUUID, 反代上下文 = {}) {
 		try { reader.releaseLock() } catch (e) { }
 		return new Response('Invalid request', { status: 400 });
 	}
-	if (isSpeedTestSite(首包.hostname) && 反代上下文.代理类型 === null) {
+	if (首包.协议 !== 'vmess' && isSpeedTestSite(首包.hostname) && 反代上下文.代理类型 === null) {
 		try { reader.releaseLock() } catch (e) { }
 		return new Response(构造本地204响应(首包.respHeader), {
 			status: 200,
@@ -632,6 +637,8 @@ async function 处理叉HTTP请求(request, yourUUID, 反代上下文 = {}) {
 	} catch (e) { }
 
 	if (首包.isUDP) return 处理叉HTTPUDP请求(首包, reader, request, 反代上下文, responseHeaders);
+
+	if (首包.协议 === 'vmess') return 处理VMess叉HTTP连接(首包, reader, request, yourUUID, 反代上下文, responseHeaders);
 
 	try { reader.releaseLock() } catch (e) { }
 
@@ -966,7 +973,21 @@ async function 读取叉HTTP首包(reader, token) {
 		const 魏烈思结果 = 尝试解析魏烈思首包(当前数据);
 		if (魏烈思结果.状态 === 'ok') return { ...魏烈思结果.结果, reader };
 
-		if (木马结果.状态 === 'invalid' && 魏烈思结果.状态 === 'invalid') return null;
+		const VMess结果 = await 尝试解析VMess请求(当前数据, token);
+		if (VMess结果.状态 === 'ok') return {
+			协议: 'vmess',
+			hostname: VMess结果.首包.hostname,
+			port: VMess结果.首包.port,
+			isUDP: VMess结果.首包.isUDP,
+			rawData: null,
+			respHeader: null,
+			原始数据: null,
+			会话: VMess结果.会话,
+			明文: VMess结果.明文,
+			reader,
+		};
+
+		if (木马结果.状态 === 'invalid' && 魏烈思结果.状态 === 'invalid' && VMess结果.状态 !== 'need_more') return null;
 	}
 
 	const 最终数据 = buffer.subarray(0, offset);
@@ -974,6 +995,19 @@ async function 读取叉HTTP首包(reader, token) {
 	if (最终木马结果.状态 === 'ok') return { ...最终木马结果.结果, reader };
 	const 最终魏烈思结果 = 尝试解析魏烈思首包(最终数据);
 	if (最终魏烈思结果.状态 === 'ok') return { ...最终魏烈思结果.结果, reader };
+	const 最终VMess结果 = await 尝试解析VMess请求(最终数据, token);
+	if (最终VMess结果.状态 === 'ok') return {
+		协议: 'vmess',
+		hostname: 最终VMess结果.首包.hostname,
+		port: 最终VMess结果.首包.port,
+		isUDP: 最终VMess结果.首包.isUDP,
+		rawData: null,
+		respHeader: null,
+		原始数据: null,
+		会话: 最终VMess结果.会话,
+		明文: 最终VMess结果.明文,
+		reader,
+	};
 	return null;
 }
 ///////////////////////////////////////////////////////////////////////gRPC传输数据///////////////////////////////////////////////
@@ -1633,6 +1667,40 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		}
 	};
 
+	let vmess会话 = null;
+	const 处理VMessWS数据 = async (chunk) => {
+		const 结果 = await vmess会话.输入(chunk);
+		for (const 明文块 of 结果.明文) {
+			if (明文块.byteLength) await 写入远端(明文块);
+		}
+	};
+
+	const 初始化VMessWS连接 = async (解析结果) => {
+		vmess会话 = 解析结果.会话;
+		await WebSocket发送并等待(serverSock, await vmess会话.生成响应头());
+		const 首包明文 = 解析结果.明文?.length ? 拼接字节数据(...解析结果.明文) : new Uint8Array(0);
+		const socket = await forwardataTCP(解析结果.首包.hostname, 解析结果.首包.port, 首包明文, serverSock, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, true);
+		if (!socket) throw new Error('VMess 远端连接建立失败');
+		(async () => {
+			const 远端读取器 = socket.readable.getReader();
+			try {
+				while (true) {
+					const { done, value } = await 远端读取器.read();
+					if (done) break;
+					const 密文 = await vmess会话.加密下行(数据转Uint8Array(value));
+					if (密文.byteLength) await WebSocket发送并等待(serverSock, 密文);
+				}
+				const 结束块 = await vmess会话.结束下行();
+				if (结束块.byteLength) await WebSocket发送并等待(serverSock, 结束块);
+			} finally {
+				try { 远端读取器.releaseLock() } catch (e) { }
+			}
+		})().catch((err) => {
+			log(`[WS-VMess] 下行结束: ${err?.message || err}`);
+			closeSocketQuietly(serverSock);
+		});
+	};
+
 	const 处理WS入站数据 = async (chunk) => {
 		let 当前块字节 = null;
 		if (isDnsQuery) {
@@ -1643,6 +1711,10 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 			await 处理SS数据(chunk);
 			return;
 		}
+		if (判断协议类型 === 'vmess') {
+			await 处理VMessWS数据(chunk);
+			return;
+		}
 		if (WS本地测速模式) {
 			await 处理WS本地测速数据(chunk);
 			return;
@@ -1650,9 +1722,17 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		if (await 写入远端(chunk)) return;
 
 		if (判断协议类型 === null) {
+			当前块字节 = 数据转Uint8Array(chunk);
 			if (url.searchParams.get('enc')) 判断协议类型 = 'ss';
 			else {
-				当前块字节 = 当前块字节 || 数据转Uint8Array(chunk);
+				const VMess尝试 = await 尝试解析VMess请求(当前块字节, yourUUID);
+				if (VMess尝试.状态 === 'ok') {
+					判断协议类型 = 'vmess';
+					判断是否是木马 = false;
+					log(`[WS转发] 协议类型: vmess | 来自: ${url.host} | UA: ${request.headers.get('user-agent') || '未知'}`);
+					await 初始化VMessWS连接(VMess尝试);
+					return;
+				}
 				const bytes = 当前块字节;
 				判断协议类型 = bytes.byteLength >= 58 && bytes[56] === 0x0d && bytes[57] === 0x0a ? '木马' : '魏烈思';
 			}
@@ -2015,11 +2095,762 @@ function 解析魏烈思请求(chunk, token) {
 const SS支持加密配置 = {
 	'aes-128-gcm': { method: 'aes-128-gcm', keyLen: 16, saltLen: 16, maxChunk: 0x3fff, aesLength: 128 },
 	'aes-256-gcm': { method: 'aes-256-gcm', keyLen: 32, saltLen: 32, maxChunk: 0x3fff, aesLength: 256 },
+	'chacha20-ietf-poly1305': { method: 'chacha20-ietf-poly1305', keyLen: 32, saltLen: 32, maxChunk: 0x3fff, chacha: true },
 };
+const SS空附加数据 = new Uint8Array(0);
 
 const SSAEAD标签长度 = 16, SSNonce长度 = 12;
 const SS子密钥信息 = new TextEncoder().encode('ss-subkey');
 const SS文本编码器 = new TextEncoder(), SS文本解码器 = new TextDecoder(), SS主密钥缓存 = new Map();
+///////////////////////////////////////////////////////VMess 协议///////////////////////////////////////////////
+const VMess常量 = {
+	选项分块: 1,
+	选项掩码: 4,
+	选项全局填充: 8,
+	选项认证长度: 16,
+	安全AES128GCM: 3,
+	安全CHACHA20: 4,
+	安全NONE: 5,
+	KDF盐: 'VMess AEAD KDF',
+	头填充: 'VMess Header AEAD Key',
+	头随机数: 'VMess Header AEAD Nonce',
+	头长度填充: 'VMess Header AEAD Key_Length',
+	头长度随机数: 'VMess Header AEAD Nonce_Length'
+};
+const VMess文本编码器 = new TextEncoder();
+const VMess文本解码器 = new TextDecoder();
+const VMess空字节 = new Uint8Array(0);
+
+function VMess转字节(值) {
+	if (值 instanceof Uint8Array) return 值;
+	if (值 instanceof ArrayBuffer) return new Uint8Array(值);
+	if (ArrayBuffer.isView(值)) return new Uint8Array(值.buffer, 值.byteOffset, 值.byteLength);
+	return VMess文本编码器.encode(String(值));
+}
+
+function VMess拼接(...段列表) {
+	let 总长 = 0;
+	for (const 段 of 段列表) 总长 += 段.byteLength;
+	const 结果 = new Uint8Array(总长);
+	let 偏移 = 0;
+	for (const 段 of 段列表) { 结果.set(段, 偏移); 偏移 += 段.byteLength }
+	return 结果;
+}
+
+function VMessU16(值) {
+	return new Uint8Array([(值 >>> 8) & 0xff, 值 & 0xff]);
+}
+
+function VMess读U16(数据, 偏移) {
+	return ((数据[偏移] << 8) | 数据[偏移 + 1]) >>> 0;
+}
+
+function VMess读U32(数据, 偏移) {
+	return (((数据[偏移] << 24) | (数据[偏移 + 1] << 16) | (数据[偏移 + 2] << 8) | 数据[偏移 + 3]) >>> 0);
+}
+
+function VMess读U64(数据, 偏移) {
+	let 值 = 0n;
+	for (let i = 0; i < 8; i++) 值 = (值 << 8n) | BigInt(数据[偏移 + i]);
+	return 值;
+}
+
+let VMessCRC32表 = null;
+function VMessCRC32(数据) {
+	if (!VMessCRC32表) {
+		VMessCRC32表 = new Uint32Array(256);
+		for (let i = 0; i < 256; i++) {
+			let c = i;
+			for (let k = 0; k < 8; k++) c = (c & 1) ? (0xedb88320 ^ (c >>> 1)) : (c >>> 1);
+			VMessCRC32表[i] = c >>> 0;
+		}
+	}
+	let crc = 0xffffffff;
+	for (let i = 0; i < 数据.length; i++) crc = (VMessCRC32表[(crc ^ 数据[i]) & 0xff] ^ (crc >>> 8)) >>> 0;
+	return (crc ^ 0xffffffff) >>> 0;
+}
+
+function VMessFNV1a(数据) {
+	let 哈希 = 0x811c9dc5;
+	for (let i = 0; i < 数据.length; i++) {
+		哈希 = Math.imul((哈希 ^ 数据[i]) >>> 0, 0x01000193) >>> 0;
+	}
+	return 哈希 >>> 0;
+}
+
+async function VMessHMAC(密钥, 数据) {
+	const 密钥对象 = await crypto.subtle.importKey('raw', 密钥, { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
+	return new Uint8Array(await crypto.subtle.sign('HMAC', 密钥对象, 数据));
+}
+
+function VMessHMAC包装(内层哈希, 密钥) {
+	const 块 = new Uint8Array(64);
+	块.set(密钥.subarray(0, Math.min(64, 密钥.length)));
+	const 内垫 = 块.map(b => b ^ 0x36);
+	const 外垫 = 块.map(b => b ^ 0x5c);
+	return async (数据) => 内层哈希(VMess拼接(外垫, await 内层哈希(VMess拼接(内垫, 数据))));
+}
+
+async function VMessKDF(密钥, ...路径) {
+	let 哈希 = (数据) => VMessHMAC(VMess转字节(VMess常量.KDF盐), 数据);
+	for (const 段 of 路径) 哈希 = VMessHMAC包装(哈希, VMess转字节(段));
+	return 哈希(VMess转字节(密钥));
+}
+
+async function VMessKDF16(密钥, ...路径) {
+	return (await VMessKDF(密钥, ...路径)).slice(0, 16);
+}
+
+async function VMessAESGCM加密(密钥, 随机数, 明文, 附加数据) {
+	const 密钥对象 = await crypto.subtle.importKey('raw', 密钥, 'AES-GCM', false, ['encrypt']);
+	const 密文 = await crypto.subtle.encrypt({ name: 'AES-GCM', iv: 随机数, tagLength: 128, additionalData: 附加数据 || VMess空字节 }, 密钥对象, 明文);
+	return new Uint8Array(密文);
+}
+
+async function VMessAESGCM解密(密钥, 随机数, 密文, 附加数据) {
+	const 密钥对象 = await crypto.subtle.importKey('raw', 密钥, 'AES-GCM', false, ['decrypt']);
+	const 明文 = await crypto.subtle.decrypt({ name: 'AES-GCM', iv: 随机数, tagLength: 128, additionalData: 附加数据 || VMess空字节 }, 密钥对象, 密文);
+	return new Uint8Array(明文);
+}
+
+// AES-128 单块解密（VMess AuthID 使用 AES-128-ECB，WebCrypto 不支持 ECB）
+const VMessAES_SBOX = new Uint8Array([
+	0x63, 0x7c, 0x77, 0x7b, 0xf2, 0x6b, 0x6f, 0xc5, 0x30, 0x01, 0x67, 0x2b, 0xfe, 0xd7, 0xab, 0x76,
+	0xca, 0x82, 0xc9, 0x7d, 0xfa, 0x59, 0x47, 0xf0, 0xad, 0xd4, 0xa2, 0xaf, 0x9c, 0xa4, 0x72, 0xc0,
+	0xb7, 0xfd, 0x93, 0x26, 0x36, 0x3f, 0xf7, 0xcc, 0x34, 0xa5, 0xe5, 0xf1, 0x71, 0xd8, 0x31, 0x15,
+	0x04, 0xc7, 0x23, 0xc3, 0x18, 0x96, 0x05, 0x9a, 0x07, 0x12, 0x80, 0xe2, 0xeb, 0x27, 0xb2, 0x75,
+	0x09, 0x83, 0x2c, 0x1a, 0x1b, 0x6e, 0x5a, 0xa0, 0x52, 0x3b, 0xd6, 0xb3, 0x29, 0xe3, 0x2f, 0x84,
+	0x53, 0xd1, 0x00, 0xed, 0x20, 0xfc, 0xb1, 0x5b, 0x6a, 0xcb, 0xbe, 0x39, 0x4a, 0x4c, 0x58, 0xcf,
+	0xd0, 0xef, 0xaa, 0xfb, 0x43, 0x4d, 0x33, 0x85, 0x45, 0xf9, 0x02, 0x7f, 0x50, 0x3c, 0x9f, 0xa8,
+	0x51, 0xa3, 0x40, 0x8f, 0x92, 0x9d, 0x38, 0xf5, 0xbc, 0xb6, 0xda, 0x21, 0x10, 0xff, 0xf3, 0xd2,
+	0xcd, 0x0c, 0x13, 0xec, 0x5f, 0x97, 0x44, 0x17, 0xc4, 0xa7, 0x7e, 0x3d, 0x64, 0x5d, 0x19, 0x73,
+	0x60, 0x81, 0x4f, 0xdc, 0x22, 0x2a, 0x90, 0x88, 0x46, 0xee, 0xb8, 0x14, 0xde, 0x5e, 0x0b, 0xdb,
+	0xe0, 0x32, 0x3a, 0x0a, 0x49, 0x06, 0x24, 0x5c, 0xc2, 0xd3, 0xac, 0x62, 0x91, 0x95, 0xe4, 0x79,
+	0xe7, 0xc8, 0x37, 0x6d, 0x8d, 0xd5, 0x4e, 0xa9, 0x6c, 0x56, 0xf4, 0xea, 0x65, 0x7a, 0xae, 0x08,
+	0xba, 0x78, 0x25, 0x2e, 0x1c, 0xa6, 0xb4, 0xc6, 0xe8, 0xdd, 0x74, 0x1f, 0x4b, 0xbd, 0x8b, 0x8a,
+	0x70, 0x3e, 0xb5, 0x66, 0x48, 0x03, 0xf6, 0x0e, 0x61, 0x35, 0x57, 0xb9, 0x86, 0xc1, 0x1d, 0x9e,
+	0xe1, 0xf8, 0x98, 0x11, 0x69, 0xd9, 0x8e, 0x94, 0x9b, 0x1e, 0x87, 0xe9, 0xce, 0x55, 0x28, 0xdf,
+	0x8c, 0xa1, 0x89, 0x0d, 0xbf, 0xe6, 0x42, 0x68, 0x41, 0x99, 0x2d, 0x0f, 0xb0, 0x54, 0xbb, 0x16
+]);
+const VMessAES逆SBOX = (() => {
+	const 表 = new Uint8Array(256);
+	for (let i = 0; i < 256; i++) 表[VMessAES_SBOX[i]] = i;
+	return 表;
+})();
+const VMessAES轮常量 = new Uint8Array([0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36]);
+
+function VMessAES有限乘(a, b) {
+	let 结果 = 0;
+	while (b) {
+		if (b & 1) 结果 ^= a;
+		a = ((a << 1) ^ (a & 0x80 ? 0x1b : 0)) & 0xff;
+		b >>= 1;
+	}
+	return 结果;
+}
+
+function VMessAES扩展密钥(密钥) {
+	const w = new Uint8Array(176);
+	w.set(密钥);
+	for (let i = 16; i < 176; i += 4) {
+		let t0 = w[i - 4], t1 = w[i - 3], t2 = w[i - 2], t3 = w[i - 1];
+		if (i % 16 === 0) {
+			const 首字节 = t0;
+			t0 = VMessAES_SBOX[t1] ^ VMessAES轮常量[(i / 16) - 1];
+			t1 = VMessAES_SBOX[t2];
+			t2 = VMessAES_SBOX[t3];
+			t3 = VMessAES_SBOX[首字节];
+		}
+		w[i] = w[i - 16] ^ t0;
+		w[i + 1] = w[i - 15] ^ t1;
+		w[i + 2] = w[i - 14] ^ t2;
+		w[i + 3] = w[i - 13] ^ t3;
+	}
+	return w;
+}
+
+function VMessAES128解密块(密钥, 密文) {
+	const w = VMessAES扩展密钥(密钥);
+	const 状态 = new Uint8Array(密文);
+	const 加轮密钥 = (轮) => {
+		for (let i = 0; i < 16; i++) 状态[i] ^= w[轮 * 16 + i];
+	};
+	const 逆列混合 = () => {
+		for (let c = 0; c < 4; c++) {
+			const i = c * 4;
+			const a0 = 状态[i], a1 = 状态[i + 1], a2 = 状态[i + 2], a3 = 状态[i + 3];
+			状态[i] = VMessAES有限乘(a0, 14) ^ VMessAES有限乘(a1, 11) ^ VMessAES有限乘(a2, 13) ^ VMessAES有限乘(a3, 9);
+			状态[i + 1] = VMessAES有限乘(a0, 9) ^ VMessAES有限乘(a1, 14) ^ VMessAES有限乘(a2, 11) ^ VMessAES有限乘(a3, 13);
+			状态[i + 2] = VMessAES有限乘(a0, 13) ^ VMessAES有限乘(a1, 9) ^ VMessAES有限乘(a2, 14) ^ VMessAES有限乘(a3, 11);
+			状态[i + 3] = VMessAES有限乘(a0, 11) ^ VMessAES有限乘(a1, 13) ^ VMessAES有限乘(a2, 9) ^ VMessAES有限乘(a3, 14);
+		}
+	};
+	加轮密钥(10);
+	for (let 轮 = 9; 轮 >= 1; 轮--) {
+		let 临时 = 状态[13];
+		状态[13] = 状态[9]; 状态[9] = 状态[5]; 状态[5] = 状态[1]; 状态[1] = 临时;
+		临时 = 状态[2]; 状态[2] = 状态[10]; 状态[10] = 临时;
+		临时 = 状态[6]; 状态[6] = 状态[14]; 状态[14] = 临时;
+		临时 = 状态[3]; 状态[3] = 状态[7]; 状态[7] = 状态[11]; 状态[11] = 状态[15]; 状态[15] = 临时;
+		for (let i = 0; i < 16; i++) 状态[i] = VMessAES逆SBOX[状态[i]];
+		加轮密钥(轮);
+		逆列混合();
+	}
+	let 临时 = 状态[13];
+	状态[13] = 状态[9]; 状态[9] = 状态[5]; 状态[5] = 状态[1]; 状态[1] = 临时;
+	临时 = 状态[2]; 状态[2] = 状态[10]; 状态[10] = 临时;
+	临时 = 状态[6]; 状态[6] = 状态[14]; 状态[14] = 临时;
+	临时 = 状态[3]; 状态[3] = 状态[7]; 状态[7] = 状态[11]; 状态[11] = 状态[15]; 状态[15] = 临时;
+	for (let i = 0; i < 16; i++) 状态[i] = VMessAES逆SBOX[状态[i]];
+	加轮密钥(0);
+	return 状态;
+}
+
+// SHAKE128（用于 VMess 分块掩码与全局填充）
+const VMessKeccak轮常量 = [
+	0x0000000000000001n, 0x0000000000008082n, 0x800000000000808an, 0x8000000080008000n,
+	0x000000000000808bn, 0x0000000080000001n, 0x8000000080008081n, 0x8000000000008009n,
+	0x000000000000008an, 0x0000000000000088n, 0x0000000080008009n, 0x000000008000000an,
+	0x000000008000808bn, 0x800000000000008bn, 0x8000000000008089n, 0x8000000000008003n,
+	0x8000000000008002n, 0x8000000000000080n, 0x000000000000800an, 0x800000008000000an,
+	0x8000000080008081n, 0x8000000000008080n, 0x0000000080000001n, 0x8000000080008008n
+];
+const VMessKeccak旋转表 = [0, 1, 62, 28, 27, 36, 44, 6, 55, 20, 3, 10, 43, 25, 39, 41, 45, 15, 21, 8, 18, 2, 61, 56, 14];
+const VMess64位掩码 = 0xffffffffffffffffn;
+
+function VMess循环左移(值, 位数) {
+	const 位 = 位数 % 64n;
+	if (位 === 0n) return 值 & VMess64位掩码;
+	return ((值 << 位) | (值 >> (64n - 位))) & VMess64位掩码;
+}
+
+function VMessKeccakF(状态) {
+	const C = new Array(5), B = new Array(25);
+	for (let 轮 = 0; 轮 < 24; 轮++) {
+		for (let x = 0; x < 5; x++) C[x] = 状态[x] ^ 状态[x + 5] ^ 状态[x + 10] ^ 状态[x + 15] ^ 状态[x + 20];
+		for (let x = 0; x < 5; x++) {
+			const D = C[(x + 4) % 5] ^ VMess循环左移(C[(x + 1) % 5], 1n);
+			for (let y = 0; y < 5; y++) 状态[x + 5 * y] ^= D;
+		}
+		for (let x = 0; x < 5; x++) {
+			for (let y = 0; y < 5; y++) {
+				B[y + 5 * ((2 * x + 3 * y) % 5)] = VMess循环左移(状态[x + 5 * y], BigInt(VMessKeccak旋转表[x + 5 * y]));
+			}
+		}
+		for (let y = 0; y < 5; y++) {
+			for (let x = 0; x < 5; x++) {
+				状态[x + 5 * y] = B[x + 5 * y] ^ ((~B[(x + 1) % 5 + 5 * y] & VMess64位掩码) & B[(x + 2) % 5 + 5 * y]);
+			}
+		}
+		状态[0] ^= VMessKeccak轮常量[轮];
+	}
+}
+
+function VMessSHAKE128流(种子) {
+	const 率 = 168;
+	const 种子字节 = VMess转字节(种子);
+	const 状态 = new Array(25).fill(0n);
+	const 吸收块 = (块) => {
+		for (let i = 0; i < 率; i++) {
+			状态[i >> 3] ^= BigInt(块[i]) << BigInt(8 * (i & 7));
+		}
+		VMessKeccakF(状态);
+	};
+	let 已填充 = false;
+	for (let 偏移 = 0; 偏移 < 种子字节.length; 偏移 += 率) {
+		const 长度 = Math.min(率, 种子字节.length - 偏移);
+		const 块 = new Uint8Array(率);
+		块.set(种子字节.subarray(偏移, 偏移 + 长度));
+		if (长度 < 率) {
+			块[长度] ^= 0x1f;
+			块[率 - 1] ^= 0x80;
+			已填充 = true;
+		}
+		吸收块(块);
+	}
+	if (!已填充) {
+		const 块 = new Uint8Array(率);
+		块[0] ^= 0x1f;
+		块[率 - 1] ^= 0x80;
+		吸收块(块);
+	}
+	const 输出缓存 = new Uint8Array(率);
+	let 输出偏移 = 率, 首次 = true;
+	const 提取块 = () => {
+		if (!首次) VMessKeccakF(状态);
+		首次 = false;
+		for (let i = 0; i < 率; i++) 输出缓存[i] = Number((状态[i >> 3] >> BigInt(8 * (i & 7))) & 0xffn);
+		输出偏移 = 0;
+	};
+	return {
+		取(字节数) {
+			const 结果 = new Uint8Array(字节数);
+			let 已取 = 0;
+			while (已取 < 字节数) {
+				if (输出偏移 >= 率) 提取块();
+				const 可复制 = Math.min(字节数 - 已取, 率 - 输出偏移);
+				结果.set(输出缓存.subarray(输出偏移, 输出偏移 + 可复制), 已取);
+				输出偏移 += 可复制;
+				已取 += 可复制;
+			}
+			return 结果;
+		}
+	};
+}
+
+function VMess随机数生成器(基础随机数) {
+	const 缓冲 = new Uint8Array(16);
+	缓冲.set(VMess转字节(基础随机数).subarray(0, 16));
+	let 计数 = 0;
+	return () => {
+		缓冲[0] = (计数 >>> 8) & 0xff;
+		缓冲[1] = 计数 & 0xff;
+		计数 = (计数 + 1) & 0xffff;
+		return 缓冲.subarray(0, 12);
+	};
+}
+
+function VMessUUID转字节(uuid) {
+	const 十六进制 = String(uuid || '').replace(/-/g, '');
+	const 字节 = new Uint8Array(16);
+	for (let i = 0; i < 16; i++) 字节[i] = parseInt(十六进制.slice(i * 2, i * 2 + 2), 16) || 0;
+	return 字节;
+}
+
+function VMess随机填充(字节数) {
+	const 结果 = new Uint8Array(字节数);
+	if (字节数 > 0) crypto.getRandomValues(结果);
+	return 结果;
+}
+
+const VMessMD5移位 = [7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21];
+const VMessMD5常量 = new Uint32Array([
+	0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613, 0xfd469501,
+	0x698098d8, 0x8b44f7af, 0xffff5bb1, 0x895cd7be, 0x6b901122, 0xfd987193, 0xa679438e, 0x49b40821,
+	0xf61e2562, 0xc040b340, 0x265e5a51, 0xe9b6c7aa, 0xd62f105d, 0x02441453, 0xd8a1e681, 0xe7d3fbc8,
+	0x21e1cde6, 0xc33707d6, 0xf4d50d87, 0x455a14ed, 0xa9e3e905, 0xfcefa3f8, 0x676f02d9, 0x8d2a4c8a,
+	0xfffa3942, 0x8771f681, 0x6d9d6122, 0xfde5380c, 0xa4beea44, 0x4bdecfa9, 0xf6bb4b60, 0xbebfbc70,
+	0x289b7ec6, 0xeaa127fa, 0xd4ef3085, 0x04881d05, 0xd9d4d039, 0xe6db99e5, 0x1fa27cf8, 0xc4ac5665,
+	0xf4292244, 0x432aff97, 0xab9423a7, 0xfc93a039, 0x655b59c3, 0x8f0ccc92, 0xffeff47d, 0x85845dd1,
+	0x6fa87e4f, 0xfe2ce6e0, 0xa3014314, 0x4e0811a1, 0xf7537e82, 0xbd3af235, 0x2ad7d2bb, 0xeb86d391
+]);
+
+function VMessMD5(数据) {
+	const 原文 = VMess转字节(数据);
+	const 填充长度 = (((原文.length + 8) >>> 6) << 6) + 64;
+	const 缓冲 = new Uint8Array(填充长度);
+	缓冲.set(原文);
+	缓冲[原文.length] = 0x80;
+	const 位长 = 原文.length * 8;
+	const 视图 = new DataView(缓冲.buffer);
+	视图.setUint32(填充长度 - 8, 位长 >>> 0, true);
+	视图.setUint32(填充长度 - 4, Math.floor(位长 / 4294967296), true);
+	let a0 = 0x67452301, b0 = 0xefcdab89, c0 = 0x98badcfe, d0 = 0x10325476;
+	const 循环左移 = (值, 位) => ((值 << 位) | (值 >>> (32 - 位))) >>> 0;
+	for (let 偏移 = 0; 偏移 < 填充长度; 偏移 += 64) {
+		const M = new Uint32Array(16);
+		for (let i = 0; i < 16; i++) M[i] = 视图.getUint32(偏移 + i * 4, true);
+		let A = a0, B = b0, C = c0, D = d0;
+		for (let i = 0; i < 64; i++) {
+			let F, G;
+			if (i < 16) { F = (B & C) | (~B & D); G = i; }
+			else if (i < 32) { F = (D & B) | (~D & C); G = (5 * i + 1) & 15; }
+			else if (i < 48) { F = B ^ C ^ D; G = (3 * i + 5) & 15; }
+			else { F = C ^ (B | ~D); G = (7 * i) & 15; }
+			const 临时 = D;
+			D = C;
+			C = B;
+			B = (B + 循环左移((A + F + VMessMD5常量[i] + M[G]) >>> 0, VMessMD5移位[i])) >>> 0;
+			A = 临时;
+		}
+		a0 = (a0 + A) >>> 0; b0 = (b0 + B) >>> 0; c0 = (c0 + C) >>> 0; d0 = (d0 + D) >>> 0;
+	}
+	const 结果 = new Uint8Array(16);
+	const 输出 = new DataView(结果.buffer);
+	输出.setUint32(0, a0, true); 输出.setUint32(4, b0, true); 输出.setUint32(8, c0, true); 输出.setUint32(12, d0, true);
+	return 结果;
+}
+
+async function VMess体加密(状态, 明文) {
+	if (状态.安全类型 === VMess常量.安全CHACHA20) return chacha20Poly1305Encrypt(状态.密钥, 状态.随机数(), 明文, VMess空字节);
+	return VMessAESGCM加密(状态.密钥, 状态.随机数(), 明文, VMess空字节);
+}
+
+async function VMess体解密(状态, 密文) {
+	if (状态.安全类型 === VMess常量.安全CHACHA20) return chacha20Poly1305Decrypt(状态.密钥, 状态.随机数(), 密文, VMess空字节);
+	return VMessAESGCM解密(状态.密钥, 状态.随机数(), 密文, VMess空字节);
+}
+
+async function VMess长度密钥(安全类型, 请求体密钥) {
+	const 原始 = await VMessKDF16(请求体密钥, 'auth_len');
+	if (安全类型 === VMess常量.安全CHACHA20) {
+		const 第一段 = VMessMD5(原始);
+		return VMess拼接(第一段, VMessMD5(第一段));
+	}
+	return 原始;
+}
+
+async function VMess长度加密(状态, 长度值) {
+	const 明文 = VMessU16(长度值 - 16);
+	if (状态.安全类型 === VMess常量.安全CHACHA20) return chacha20Poly1305Encrypt(状态.长度密钥, 状态.长度随机数(), 明文, VMess空字节);
+	return VMessAESGCM加密(状态.长度密钥, 状态.长度随机数(), 明文, VMess空字节);
+}
+
+async function VMess长度解密(状态, 字段) {
+	let 明文;
+	if (状态.安全类型 === VMess常量.安全CHACHA20) 明文 = chacha20Poly1305Decrypt(状态.长度密钥, 状态.长度随机数(), 字段, VMess空字节);
+	else 明文 = await VMessAESGCM解密(状态.长度密钥, 状态.长度随机数(), 字段, VMess空字节);
+	return VMess读U16(明文, 0) + 16;
+}
+
+class VMess会话 {
+	constructor(uuid) {
+		this.uuid字节 = VMessUUID转字节(uuid);
+		this.缓冲 = VMess空字节;
+		this.头 = null;
+		this.上行状态 = null;
+		this.下行状态 = null;
+		this.上行已结束 = false;
+		this.响应体密钥 = null;
+		this.响应体IV = null;
+	}
+
+	async 尝试解析头() {
+		const 数据 = this.缓冲;
+		if (数据.byteLength < 42) return null;
+		const 认证ID = 数据.subarray(0, 16);
+		const 认证密钥 = await VMessKDF16(this.uuid字节, 'AES Auth ID Encryption');
+		const 认证明文 = VMessAES128解密块(认证密钥, 认证ID);
+		const 时间戳 = Number(VMess读U64(认证明文, 0));
+		const 校验值 = VMess读U32(认证明文, 12);
+		if (VMessCRC32(认证明文.subarray(0, 12)) !== 校验值) throw new Error('VMess 认证信息无效');
+		if (Math.abs(时间戳 - Math.floor(Date.now() / 1000)) > 120) throw new Error('VMess 时间戳超出允许范围');
+		const 长度密文 = 数据.subarray(16, 34);
+		const 连接随机数 = 数据.subarray(34, 42);
+		const 长度密钥 = await VMessKDF16(this.uuid字节, VMess常量.头长度填充, 认证ID, 连接随机数);
+		const 长度随机数 = (await VMessKDF(this.uuid字节, VMess常量.头长度随机数, 认证ID, 连接随机数)).slice(0, 12);
+		const 长度明文 = await VMessAESGCM解密(长度密钥, 长度随机数, 长度密文, 认证ID);
+		const 载荷长度 = VMess读U16(长度明文, 0);
+		if (载荷长度 < 45) throw new Error('VMess 头部内容过短');
+		const 总长度 = 42 + 载荷长度 + 16;
+		if (数据.byteLength < 总长度) return null;
+		const 载荷密文 = 数据.subarray(42, 总长度);
+		const 载荷密钥 = await VMessKDF16(this.uuid字节, VMess常量.头填充, 认证ID, 连接随机数);
+		const 载荷随机数 = (await VMessKDF(this.uuid字节, VMess常量.头随机数, 认证ID, 连接随机数)).slice(0, 12);
+		const 头字节 = await VMessAESGCM解密(载荷密钥, 载荷随机数, 载荷密文, 认证ID);
+		if (头字节.byteLength < 42) throw new Error('VMess 头部长度异常');
+		if (VMessFNV1a(头字节.subarray(0, 载荷长度 - 4)) !== VMess读U32(头字节, 载荷长度 - 4)) throw new Error('VMess 头部校验失败');
+
+		const 请求体IV = 头字节.subarray(1, 17);
+		const 请求体密钥 = 头字节.subarray(17, 33);
+		const 响应头 = 头字节[33];
+		const 选项 = 头字节[34];
+		const 填充长度 = 头字节[35] >> 4;
+		const 安全类型 = 头字节[35] & 0x0f;
+		const 命令 = 头字节[37];
+		if (命令 === 3) throw new Error('VMess mux 暂不支持');
+		if (命令 !== 1 && 命令 !== 2) throw new Error('VMess 命令无效');
+		if (![VMess常量.安全AES128GCM, VMess常量.安全CHACHA20, VMess常量.安全NONE].includes(安全类型)) throw new Error('VMess 加密方式不支持');
+		const 端口 = VMess读U16(头字节, 38);
+		const 地址类型 = 头字节[40];
+		let 偏移 = 41, hostname = '';
+		if (地址类型 === 1) {
+			if (头字节.byteLength < 45) throw new Error('VMess IPv4 地址长度异常');
+			hostname = `${头字节[41]}.${头字节[42]}.${头字节[43]}.${头字节[44]}`;
+			偏移 = 45;
+		} else if (地址类型 === 2) {
+			const 域名长度 = 头字节[41];
+			if (头字节.byteLength < 42 + 域名长度) throw new Error('VMess 域名长度异常');
+			hostname = VMess文本解码器.decode(头字节.subarray(42, 42 + 域名长度));
+			偏移 = 42 + 域名长度;
+		} else if (地址类型 === 3) {
+			if (头字节.byteLength < 57) throw new Error('VMess IPv6 地址长度异常');
+			const 段 = [];
+			for (let i = 0; i < 8; i++) 段.push(VMess读U16(头字节, 41 + i * 2).toString(16));
+			hostname = 段.join(':');
+			偏移 = 57;
+		} else throw new Error('VMess 地址类型无效');
+		if (偏移 + 填充长度 + 4 !== 载荷长度) throw new Error('VMess 头部长度不匹配');
+		if (!hostname) throw new Error('VMess 目标地址为空');
+
+		this.缓冲 = 数据.subarray(总长度);
+		this.头 = {
+			协议: 'vmess', hostname, port: 端口, isUDP: 命令 === 2,
+			请求体IV, 请求体密钥, 响应头, 选项, 安全类型,
+			版本: 头字节[0]
+		};
+		await this.初始化上下行();
+		return this.头;
+	}
+
+	async 初始化上下行() {
+		const 头 = this.头;
+		const 分块 = 头.安全类型 !== VMess常量.安全NONE || (头.选项 & VMess常量.选项分块);
+		const 认证长度 = 头.安全类型 !== VMess常量.安全NONE && (头.选项 & VMess常量.选项认证长度);
+		let 上行密钥 = null;
+		if (头.安全类型 === VMess常量.安全AES128GCM) {
+			上行密钥 = 头.请求体密钥;
+		} else if (头.安全类型 === VMess常量.安全CHACHA20) {
+			const 第一段 = VMessMD5(头.请求体密钥);
+			上行密钥 = VMess拼接(第一段, VMessMD5(第一段));
+		}
+		this.上行状态 = {
+			分块,
+			安全类型: 头.安全类型,
+			选项: 头.选项,
+			密钥: 上行密钥,
+			随机数: 上行密钥 ? VMess随机数生成器(头.请求体IV) : null,
+			认证长度,
+			长度密钥: 认证长度 ? await VMess长度密钥(头.安全类型, 头.请求体密钥) : null,
+			长度随机数: 认证长度 ? VMess随机数生成器(头.请求体IV) : null,
+			共享流: (头.选项 & VMess常量.选项掩码) ? VMessSHAKE128流(头.请求体IV) : null,
+			使用填充: 头.安全类型 !== VMess常量.安全NONE && (头.选项 & VMess常量.选项掩码) && (头.选项 & VMess常量.选项全局填充),
+			当前块长度: null,
+			当前块填充: 0
+		};
+	}
+
+	async 生成响应头() {
+		const 头 = this.头;
+		const 摘要 = async (数据) => new Uint8Array(await crypto.subtle.digest('SHA-256', 数据));
+		this.响应体密钥 = (await 摘要(头.请求体密钥)).slice(0, 16);
+		this.响应体IV = (await 摘要(头.请求体IV)).slice(0, 16);
+		const 明文头 = new Uint8Array([头.响应头, 0, 0, 0]);
+		const 长度密钥 = await VMessKDF16(this.响应体密钥, 'AEAD Resp Header Len Key');
+		const 长度随机数 = (await VMessKDF(this.响应体IV, 'AEAD Resp Header Len IV')).slice(0, 12);
+		const 长度密文 = await VMessAESGCM加密(长度密钥, 长度随机数, VMessU16(4), VMess空字节);
+		const 载荷密钥 = await VMessKDF16(this.响应体密钥, 'AEAD Resp Header Key');
+		const 载荷随机数 = (await VMessKDF(this.响应体IV, 'AEAD Resp Header IV')).slice(0, 12);
+		const 载荷密文 = await VMessAESGCM加密(载荷密钥, 载荷随机数, 明文头, VMess空字节);
+		const 分块 = 头.安全类型 !== VMess常量.安全NONE || (头.选项 & VMess常量.选项分块);
+		const 认证长度 = 头.安全类型 !== VMess常量.安全NONE && (头.选项 & VMess常量.选项认证长度);
+		let 下行密钥 = null;
+		if (头.安全类型 === VMess常量.安全AES128GCM) 下行密钥 = this.响应体密钥;
+		else if (头.安全类型 === VMess常量.安全CHACHA20) {
+			const 第一段 = VMessMD5(this.响应体密钥);
+			下行密钥 = VMess拼接(第一段, VMessMD5(第一段));
+		}
+		this.下行状态 = {
+			分块,
+			安全类型: 头.安全类型,
+			密钥: 下行密钥,
+			随机数: 下行密钥 ? VMess随机数生成器(this.响应体IV) : null,
+			认证长度,
+			长度密钥: 认证长度 ? await VMess长度密钥(头.安全类型, 头.请求体密钥) : null,
+			长度随机数: 认证长度 ? VMess随机数生成器(头.请求体IV) : null,
+			共享流: (头.选项 & VMess常量.选项掩码) ? VMessSHAKE128流(this.响应体IV) : null,
+			使用填充: 头.安全类型 !== VMess常量.安全NONE && (头.选项 & VMess常量.选项掩码) && (头.选项 & VMess常量.选项全局填充),
+			当前块填充: 0
+		};
+		return VMess拼接(长度密文, 载荷密文);
+	}
+
+	async 输入(密文) {
+		const 块 = VMess转字节(密文);
+		if (块.byteLength) this.缓冲 = this.缓冲.byteLength ? VMess拼接(this.缓冲, 块) : 块;
+		let 首包 = null;
+		if (!this.头) 首包 = await this.尝试解析头();
+		if (!this.头) return { 首包: null, 明文: [] };
+		return { 首包, 明文: await this.解密可用块() };
+	}
+
+	async 解密可用块() {
+		const 输出 = [];
+		const 状态 = this.上行状态;
+		if (!状态.分块) {
+			if (this.缓冲.byteLength) { 输出.push(this.缓冲); this.缓冲 = VMess空字节; }
+			return 输出;
+		}
+		while (!this.上行已结束) {
+			if (状态.当前块长度 === null) {
+				const 字段长度 = 状态.认证长度 ? 18 : 2;
+				if (this.缓冲.byteLength < 字段长度) break;
+				if (状态.使用填充) 状态.当前块填充 = VMess读U16(状态.共享流.取(2), 0) % 64;
+				const 字段 = this.缓冲.subarray(0, 字段长度);
+				this.缓冲 = this.缓冲.subarray(字段长度);
+				if (状态.认证长度) {
+					状态.当前块长度 = await VMess长度解密(状态, 字段);
+				} else if (状态.共享流) {
+					const 掩码 = 状态.共享流.取(2);
+					状态.当前块长度 = VMess读U16(字段, 0) ^ VMess读U16(掩码, 0);
+				} else {
+					状态.当前块长度 = VMess读U16(字段, 0);
+				}
+			}
+			const 长度 = 状态.当前块长度;
+			if (this.缓冲.byteLength < 长度) break;
+			const 密文块 = this.缓冲.subarray(0, 长度);
+			this.缓冲 = this.缓冲.subarray(长度);
+			状态.当前块长度 = null;
+			const 填充长度 = 状态.当前块填充 || 0;
+			const 有效长度 = 长度 - 填充长度;
+			if (有效长度 < 0) throw new Error('VMess 分块填充异常');
+			if (状态.安全类型 === VMess常量.安全NONE) {
+				if (有效长度 === 0) { this.上行已结束 = true; break; }
+				输出.push(密文块.subarray(0, 有效长度));
+			} else {
+				if (有效长度 === 16) { this.上行已结束 = true; break; }
+				输出.push(await VMess体解密(状态, 密文块.subarray(0, 有效长度)));
+			}
+		}
+		return 输出;
+	}
+
+	async 打包下行块(块) {
+		const 状态 = this.下行状态;
+		let 填充长度 = 0;
+		if (状态.使用填充) 填充长度 = VMess读U16(状态.共享流.取(2), 0) % 64;
+		let 密文块, 长度值;
+		if (状态.安全类型 === VMess常量.安全NONE) {
+			密文块 = 块;
+			长度值 = 块.byteLength;
+		} else {
+			密文块 = await VMess体加密(状态, 块);
+			长度值 = 密文块.byteLength + 填充长度;
+		}
+		let 长度字段;
+		if (状态.认证长度) {
+			长度字段 = await VMess长度加密(状态, 长度值);
+		} else if (状态.共享流) {
+			const 掩码 = 状态.共享流.取(2);
+			长度字段 = VMessU16(长度值 ^ VMess读U16(掩码, 0));
+		} else {
+			长度字段 = VMessU16(长度值);
+		}
+		return 填充长度 ? VMess拼接(长度字段, 密文块, VMess随机填充(填充长度)) : VMess拼接(长度字段, 密文块);
+	}
+
+	async 加密下行(明文) {
+		const 状态 = this.下行状态;
+		const 数据 = VMess转字节(明文);
+		if (!状态.分块) return 数据.byteLength ? 数据 : VMess空字节;
+		const 片段 = [];
+		const 单块上限 = 16384;
+		for (let 偏移 = 0; 偏移 < 数据.byteLength; 偏移 += 单块上限) {
+			片段.push(await this.打包下行块(数据.subarray(偏移, 偏移 + 单块上限)));
+		}
+		return 片段.length ? VMess拼接(...片段) : VMess空字节;
+	}
+
+	async 结束下行() {
+		const 状态 = this.下行状态;
+		if (!状态 || !状态.分块) return VMess空字节;
+		return this.打包下行块(VMess空字节);
+	}
+}
+
+async function 尝试解析VMess请求(字节, uuid) {
+	try {
+		const 会话 = new VMess会话(uuid);
+		const 结果 = await 会话.输入(字节);
+		if (结果.首包) return { 状态: 'ok', 会话, 首包: 结果.首包, 明文: 结果.明文 };
+		return { 状态: 'need_more' };
+	} catch (e) {
+		return { 状态: 'invalid', 原因: e?.message || `${e}` };
+	}
+}
+
+async function 处理VMess叉HTTP连接(首包, reader, request, yourUUID, 反代上下文, responseHeaders) {
+	const 会话 = 首包.会话;
+	const remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null, downlinkDrain: Promise.resolve() };
+	const 占位WS = { readyState: WebSocket.OPEN };
+	const 首包明文 = 首包.明文?.length ? VMess拼接(...首包.明文) : VMess空字节;
+	let socket;
+	try {
+		socket = await forwardataTCP(首包.hostname, 首包.port, 首包明文, 占位WS, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, true);
+	} catch (err) {
+		log(`[VMess-叉HTTP] 连接失败: ${err?.message || err}`);
+		try { reader.releaseLock() } catch (e) { }
+		return new Response('bad gateway', { status: 502 });
+	}
+	if (!socket) {
+		try { reader.releaseLock() } catch (e) { }
+		return new Response('bad gateway', { status: 502 });
+	}
+
+	const 响应流 = typeof IdentityTransformStream !== 'undefined' ? new IdentityTransformStream() : new TransformStream();
+
+	const 上行Promise = (async () => {
+		const writer = socket.writable.getWriter();
+		try {
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				const 结果 = await 会话.输入(数据转Uint8Array(value));
+				for (const 明文块 of 结果.明文) {
+					if (明文块.byteLength) await writer.write(明文块);
+				}
+			}
+		} finally {
+			try { await writer.close() } catch (e) { }
+			try { writer.releaseLock() } catch (e) { }
+			try { reader.releaseLock() } catch (e) { }
+		}
+	})();
+
+	const 下行Promise = (async () => {
+		const writer = 响应流.writable.getWriter();
+		try {
+			await writer.write(await 会话.生成响应头());
+			const 远端读取器 = socket.readable.getReader();
+			try {
+				while (true) {
+					const { done, value } = await 远端读取器.read();
+					if (done) break;
+					const 密文 = await 会话.加密下行(数据转Uint8Array(value));
+					if (密文.byteLength) await writer.write(密文);
+				}
+			} finally {
+				try { 远端读取器.releaseLock() } catch (e) { }
+			}
+			const 结束块 = await 会话.结束下行();
+			if (结束块.byteLength) await writer.write(结束块);
+		} finally {
+			try { await writer.close() } catch (e) { }
+			try { writer.releaseLock() } catch (e) { }
+		}
+	})();
+
+	void 上行Promise.catch((err) => {
+		log(`[VMess-叉HTTP] 上行结束: ${err?.message || err}`);
+		try { socket.close() } catch (e) { }
+	});
+	void 下行Promise.catch((err) => {
+		log(`[VMess-叉HTTP] 下行结束: ${err?.message || err}`);
+		try { socket.close() } catch (e) { }
+	});
+
+	return new Response(响应流.readable, { status: 200, headers: responseHeaders });
+}
+
+function VMess文本Base64(文本) {
+	const 字节 = new TextEncoder().encode(文本);
+	let 二进制 = '';
+	for (let i = 0; i < 字节.length; i++) 二进制 += String.fromCharCode(字节[i]);
+	return btoa(二进制);
+}
+
+function 构造VMess链接({ 地址, 端口, UUID, 备注, 传输协议 = 'ws', 路径 = '/', 主机名, TLS = true, SNI, ALPN = '', 指纹 = 'chrome', 加密方式 = 'auto' }) {
+	const 节点 = {
+		v: '2',
+		ps: 备注 || 地址,
+		add: 地址,
+		port: String(端口),
+		id: UUID,
+		aid: '0',
+		scy: 加密方式,
+		net: 传输协议,
+		type: 传输协议 === 'grpc' ? 'gun' : (传输协议 === 'xhttp' ? 'stream-up' : 'none'),
+		host: 主机名 || 地址,
+		path: 路径 || (传输协议 === 'grpc' ? '' : '/'),
+		tls: TLS ? 'tls' : '',
+		sni: SNI || 主机名 || 地址,
+		alpn: ALPN || '',
+		fp: 指纹 || 'chrome'
+	};
+	return 'vmess://' + VMess文本Base64(JSON.stringify(节点));
+}
+
 
 function 数据转Uint8Array(data) {
 	if (data instanceof Uint8Array) return data;
@@ -2136,7 +2967,7 @@ async function SS派生主密钥(passwordText, keyLen) {
 	catch (error) { SS主密钥缓存.delete(cacheKey); throw error }
 }
 
-async function SS派生会话密钥(config, masterKey, salt, usages) {
+async function SS派生原始会话密钥(config, masterKey, salt) {
 	const hmacOpts = { name: 'HMAC', hash: 'SHA-1' };
 	const saltHmacKey = await crypto.subtle.importKey('raw', salt, hmacOpts, false, ['sign']);
 	const prk = new Uint8Array(await crypto.subtle.sign('HMAC', saltHmacKey, masterKey));
@@ -2150,21 +2981,30 @@ async function SS派生会话密钥(config, masterKey, salt, usages) {
 		subKey.set(prev.subarray(0, copyLen), written);
 		written += copyLen; counter += 1;
 	}
-	return crypto.subtle.importKey('raw', subKey, { name: 'AES-GCM', length: config.aesLength }, false, usages);
+	return subKey;
+}
+
+async function SS派生会话密钥(config, masterKey, salt, usages) {
+	const 会话密钥 = await SS派生原始会话密钥(config, masterKey, salt);
+	return config.chacha ? { 类型: 'chacha', 密钥: 会话密钥 } : crypto.subtle.importKey('raw', 会话密钥, { name: 'AES-GCM', length: config.aesLength }, false, usages);
 }
 
 async function SSAEAD加密(cryptoKey, nonceCounter, plaintext) {
 	const iv = nonceCounter.slice();
-	const ct = await crypto.subtle.encrypt({ name: 'AES-GCM', iv, tagLength: 128 }, cryptoKey, plaintext);
+	const ct = cryptoKey?.类型 === 'chacha'
+		? chacha20Poly1305Encrypt(cryptoKey.密钥, iv, plaintext, SS空附加数据)
+		: new Uint8Array(await crypto.subtle.encrypt({ name: 'AES-GCM', iv, tagLength: 128 }, cryptoKey, plaintext));
 	SS递增Nonce计数器(nonceCounter);
-	return new Uint8Array(ct);
+	return ct;
 }
 
 async function SSAEAD解密(cryptoKey, nonceCounter, ciphertext) {
 	const iv = nonceCounter.slice();
-	const pt = await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, cryptoKey, ciphertext);
+	const pt = cryptoKey?.类型 === 'chacha'
+		? chacha20Poly1305Decrypt(cryptoKey.密钥, iv, ciphertext, SS空附加数据)
+		: new Uint8Array(await crypto.subtle.decrypt({ name: 'AES-GCM', iv, tagLength: 128 }, cryptoKey, ciphertext));
 	SS递增Nonce计数器(nonceCounter);
-	return new Uint8Array(pt);
+	return pt;
 }
 
 async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnWrapper, yourUUID, request = null, 反代上下文 = {}, 允许木马反代 = false, 木马反代首包数据 = null, 仅建立连接 = false) {
@@ -5738,6 +6578,10 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 	if (!config_JSON.HOSTS) config_JSON.HOSTS = [hostname];
 	if (env.HOST) config_JSON.HOSTS = (await 整理成数组(env.HOST)).map(h => h.toLowerCase().replace(/^https?:\/\//, '').split('/')[0].split(':')[0]);
 	config_JSON.UUID = userID;
+	if (env.PROTOCOL) {
+		const 指定协议 = String(env.PROTOCOL).toLowerCase();
+		if (['vless', 'trojan', 'ss', 'vmess'].includes(指定协议)) config_JSON.协议类型 = 指定协议;
+	}
 	if (!config_JSON.随机路径) config_JSON.随机路径 = false;
 	if (!config_JSON.启用0RTT) config_JSON.启用0RTT = false;
 
@@ -5807,7 +6651,9 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 	const 传输路径参数值 = 获取传输路径参数值(config_JSON, config_JSON.完整节点路径);
 	config_JSON.LINK = config_JSON.协议类型 === 'ss'
 		? `${config_JSON.协议类型}://${btoa(config_JSON.SS.加密方式 + ':' + userID)}@${host}:${config_JSON.SS.TLS ? '443' : '80'}?plugin=v2${encodeURIComponent(`ray-plugin;mode=websocket;host=${host};path=${((config_JSON.完整节点路径.includes('?') ? config_JSON.完整节点路径.replace('?', '?enc=' + config_JSON.SS.加密方式 + '&') : (config_JSON.完整节点路径 + '?enc=' + config_JSON.SS.加密方式)) + (config_JSON.SS.TLS ? ';tls' : ''))};mux=0`) + ECHLINK参数}#${encodeURIComponent(config_JSON.优选订阅生成.SUBNAME)}`
-		: `${config_JSON.协议类型}://${userID}@${host}:443?security=tls&type=${传输协议 + ECHLINK参数}&${域名字段名}=${host}&fp=${config_JSON.Fingerprint}&sni=${host}&${路径字段名}=${encodeURIComponent(传输路径参数值) + TLS分片参数}&encryption=none#${encodeURIComponent(config_JSON.优选订阅生成.SUBNAME)}`;
+		: config_JSON.协议类型 === 'vmess'
+			? 构造VMess链接({ 地址: host, 端口: 443, UUID: userID, 备注: config_JSON.优选订阅生成.SUBNAME, 传输协议, 路径: 传输路径参数值, 主机名: host, TLS: true, SNI: host, ALPN: config_JSON.ALPN, 指纹: config_JSON.Fingerprint })
+			: `${config_JSON.协议类型}://${userID}@${host}:443?security=tls&type=${传输协议 + ECHLINK参数}&${域名字段名}=${host}&fp=${config_JSON.Fingerprint}&sni=${host}&${路径字段名}=${encodeURIComponent(传输路径参数值) + TLS分片参数}&encryption=none#${encodeURIComponent(config_JSON.优选订阅生成.SUBNAME)}`;
 	config_JSON.优选订阅生成.TOKEN = await MD5MD5(hostname + userID);
 
 	const 初始化TG_JSON = { BotToken: null, ChatID: null };
