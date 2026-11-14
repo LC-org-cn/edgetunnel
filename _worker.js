@@ -144,7 +144,7 @@ export default {
 						try {
 							const checkParsed = await 获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议), true);
 							const { username, password, hostname, port } = checkParsed;
-							const 完整代理参数 = username && password ? `${username}:${password}@${hostname}:${port}` : `${hostname}:${port}`;
+							const 完整代理参数 = username && password ? `${username}:${password}@${hostname}:${port}` : (username ? `${username}@${hostname}:${port}` : `${hostname}:${port}`);
 							try {
 								const 检测主机 = 'cloudflare.com', 检测端口 = 443, encoder = new TextEncoder(), decoder = new TextDecoder();
 								const TCP连接 = 创建请求TCP连接器(request);
@@ -4044,19 +4044,29 @@ async function socks4Connect(targetHost, targetPort, initialData, TCP连接, par
 		await writer.write(请求包);
 		let 响应缓冲 = new Uint8Array(0);
 		while (响应缓冲.byteLength < 8) {
-			const { done, value } = await reader.read();
+			const { done, value } = await withTimeout(reader.read(), 15000, 'SOCKS4 代理响应超时');
 			if (done) break;
 			响应缓冲 = 拼接字节数据(响应缓冲, 数据转Uint8Array(value));
 		}
-		if (响应缓冲.byteLength < 8) throw new Error('SOCKS4 响应长度不足');
+		if (响应缓冲.byteLength < 8) throw new Error('SOCKS4 响应长度不足，服务器可能不支持 SOCKS4a（域名目标）');
 		if (响应缓冲[1] !== 0x5a) throw new Error(`SOCKS4 连接失败，响应码: 0x${响应缓冲[1].toString(16)}`);
 		if (有效数据长度(initialData) > 0) await writer.write(数据转Uint8Array(initialData));
 		writer.releaseLock(); reader.releaseLock();
 		if (响应缓冲.byteLength > 8) {
-			const 剩余数据 = 响应缓冲.subarray(8), { readable, writable } = new TransformStream(), 回灌写入器 = writable.getWriter();
-			await 回灌写入器.write(剩余数据);
-			回灌写入器.releaseLock();
-			socket.readable.pipeTo(writable).catch(() => { });
+			const 剩余数据 = 响应缓冲.subarray(8), 源读取器 = socket.readable.getReader();
+			let 已回灌 = false;
+			const readable = new ReadableStream({
+				async pull(controller) {
+					if (!已回灌) {
+						已回灌 = true;
+						controller.enqueue(剩余数据);
+						return;
+					}
+					const { done, value } = await 源读取器.read();
+					done ? controller.close() : controller.enqueue(value);
+				},
+				cancel(reason) { return 源读取器.cancel(reason) }
+			});
 			return { readable, writable: socket.writable, closed: socket.closed, close: () => socket.close() };
 		}
 		return socket;
@@ -6586,7 +6596,7 @@ async function save(){
 async function checkProxy(){
 	var type = el('proxyType').value, addr = el('proxyAddr').value.trim();
 	if (!addr) { el('checkState').textContent = '请先填写代理地址'; return }
-	el('checkState').textContent = '检测中...'; el('checkResult').textContent = '—';
+	el('checkState').textContent = '检测中...'; el('checkState').className = 'muted'; el('checkResult').textContent = '—';
 	var res = await fetch('/admin/check?' + type + '=' + encodeURIComponent(addr));
 	var data = await res.json().catch(function(){ return { error: '响应解析失败' } });
 	el('checkResult').textContent = JSON.stringify(data, null, 2);
