@@ -6553,19 +6553,22 @@ function copyText(id){
 	if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done).catch(function(){ node.select(); document.execCommand('copy'); done() });
 	else { node.select(); document.execCommand('copy'); done() }
 }
-function renderTransportNote(){
-	var t = el('transport').value, p = el('protocol').value;
+var TRANSPORT_ALLOW = { vless: ['ws','xhttp','grpc'], trojan: ['ws','xhttp','grpc'], vmess: ['ws','xhttp'], ss: ['ws'] };
+function syncTransport(){
+	var p = el('protocol').value, t = el('transport'), allow = TRANSPORT_ALLOW[p] || ['ws'];
+	Array.prototype.forEach.call(t.options, function(o){ o.disabled = allow.indexOf(o.value) === -1 });
+	if (allow.indexOf(t.value) === -1) t.value = 'ws';
 	var note = '';
-	if (t === 'grpc' && (p === 'vmess' || p === 'ss')) note = '该协议不支持 gRPC，客户端将无法连接。';
-	else if (p === 'ss' && t === 'grpc') note = 'SS 入站仅支持 WS/XHTTP。';
-	else if (p === 'ss') note = 'SS 入站依赖 ray-plugin WebSocket 插件。';
+	if (p === 'ss') note = 'SS 入站仅支持 WebSocket（ray-plugin）传输。';
+	else if (p === 'vmess') note = 'VMess 支持 WebSocket / XHTTP，不支持 gRPC。';
 	el('transportNote').textContent = note;
 }
 async function load(){
 	var res = await fetch('/admin/config.json', { cache: 'no-store' });
 	var cfg = await res.json();
 	CURRENT = cfg;
-	el('protocol').value = cfg.协议类型 || 'vless';
+	var 当前协议 = cfg.协议类型 || 'vless';
+	el('protocol').value = TRANSPORT_ALLOW[当前协议] ? 当前协议 : 'vless';
 	el('transport').value = cfg.传输协议 || 'ws';
 	var ss = cfg.SS || {};
 	el('ssEnc').value = ss.加密方式 || 'aes-128-gcm';
@@ -6575,7 +6578,7 @@ async function load(){
 	el('hostNow').textContent = location.host;
 	el('link').value = cfg.LINK || '';
 	el('sub').value = location.origin + '/sub?token=' + (cfg.优选订阅生成 && cfg.优选订阅生成.TOKEN ? cfg.优选订阅生成.TOKEN : '');
-	renderTransportNote();
+	syncTransport();
 }
 async function save(){
 	var res = await fetch('/admin/config.json', { cache: 'no-store' });
@@ -6603,8 +6606,8 @@ async function checkProxy(){
 	el('checkState').textContent = data.success ? '连接成功' : '连接失败';
 	el('checkState').className = data.success ? 'ok' : 'bad';
 }
-el('protocol').addEventListener('change', renderTransportNote);
-el('transport').addEventListener('change', renderTransportNote);
+el('protocol').addEventListener('change', syncTransport);
+el('transport').addEventListener('change', syncTransport);
 load().catch(function(e){ el('saveState').textContent = '读取配置失败: ' + e.message });
 </script>
 </body>
@@ -6969,6 +6972,9 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 
 	if (!config_JSON.gRPC模式) config_JSON.gRPC模式 = 'gun';
 	if (!config_JSON.SS) config_JSON.SS = { 加密方式: "aes-128-gcm", TLS: false };
+	// 归一化不支持的协议/传输组合，避免生成无法连接的节点链接
+	if (config_JSON.协议类型 === 'ss' && config_JSON.传输协议 !== 'ws') config_JSON.传输协议 = 'ws';
+	if (config_JSON.协议类型 === 'vmess' && config_JSON.传输协议 === 'grpc') config_JSON.传输协议 = 'ws';
 
 	if (!config_JSON.反代.路径模板?.[_p]) {
 		config_JSON.反代.路径模板 = {
