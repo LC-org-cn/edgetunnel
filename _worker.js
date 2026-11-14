@@ -1,4 +1,4 @@
-﻿const Version = '2026-11-15 14:00:00';
+﻿const Version = '2026-11-15 18:00:00';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
 const Pages静态页面 = 'https://edt-pages.github.io', EDT_版本号 = Number(String(Version).replace(/\D+/g, ''));
@@ -136,13 +136,13 @@ export default {
 						}
 						return new Response(JSON.stringify({ success: false, data: [] }, null, 2), { status: 403, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					} else if (访问路径 === 'admin/check') {// 代理检查
-						const 代理协议 = ['socks5', 'http', 'https', 'turn', 'sstp'].find(类型 => url.searchParams.has(类型)) || null;
+						const 代理协议 = ['socks5', 'socks4', 'ss', 'http', 'https', 'turn', 'sstp'].find(类型 => url.searchParams.has(类型)) || null;
 						if (!代理协议) return new Response(JSON.stringify({ error: '缺少代理参数' }), { status: 400, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 						const 代理参数 = url.searchParams.get(代理协议);
 						const startTime = Date.now();
 						let 检测代理响应;
 						try {
-							const checkParsed = await 获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议));
+							const checkParsed = await 获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议), true);
 							const { username, password, hostname, port } = checkParsed;
 							const 完整代理参数 = username && password ? `${username}:${password}@${hostname}:${port}` : `${hostname}:${port}`;
 							try {
@@ -152,13 +152,17 @@ export default {
 								try {
 									tcpSocket = 代理协议 === 'socks5'
 										? await socks5Connect(检测主机, 检测端口, new Uint8Array(0), TCP连接, checkParsed)
-										: 代理协议 === 'turn'
-											? await turnConnect(checkParsed, 检测主机, 检测端口, TCP连接)
-											: 代理协议 === 'sstp'
-												? await sstpConnect(checkParsed, 检测主机, 检测端口, TCP连接)
-												: (代理协议 === 'https' && isIPHostname(hostname)
-													? await httpsConnect(检测主机, 检测端口, new Uint8Array(0), TCP连接, checkParsed)
-													: await httpConnect(检测主机, 检测端口, new Uint8Array(0), 代理协议 === 'https', TCP连接, checkParsed));
+										: 代理协议 === 'socks4'
+											? await socks4Connect(检测主机, 检测端口, new Uint8Array(0), TCP连接, checkParsed)
+											: 代理协议 === 'ss'
+												? await shadowsocksConnect(检测主机, 检测端口, new Uint8Array(0), TCP连接, checkParsed)
+												: 代理协议 === 'turn'
+													? await turnConnect(checkParsed, 检测主机, 检测端口, TCP连接)
+													: 代理协议 === 'sstp'
+														? await sstpConnect(checkParsed, 检测主机, 检测端口, TCP连接)
+														: (代理协议 === 'https' && isIPHostname(hostname)
+															? await httpsConnect(检测主机, 检测端口, new Uint8Array(0), TCP连接, checkParsed)
+															: await httpConnect(检测主机, 检测端口, new Uint8Array(0), 代理协议 === 'https', TCP连接, checkParsed));
 									if (!tcpSocket) throw new Error('无法连接到代理服务器');
 									tlsSocket = new TlsClient(tcpSocket, { serverName: 检测主机, insecure: true });
 									await tlsSocket.handshake();
@@ -295,6 +299,10 @@ export default {
 						return new Response(JSON.stringify(request.cf, null, 2), { status: 200, headers: { 'Content-Type': 'application/json;charset=utf-8' } });
 					}
 
+					if (访问路径 === 'admin/local' || (访问路径 === 'admin' && ['1', 'true'].includes(String(env.LOCAL_UI || '').toLowerCase()))) {
+						return new Response(内置管理页面(env), { status: 200, headers: { 'Content-Type': 'text/html;charset=utf-8', 'Cache-Control': 'no-store, no-cache, must-revalidate', 'Pragma': 'no-cache' } });
+					}
+
 					ctx.waitUntil(请求日志记录(env, request, 访问IP, 'Admin_Login', config_JSON));
 					return fetch(Pages静态页面 + '/admin' + url.search);
 				} else if (访问路径 === 'logout' || uuidRegex.test(访问路径)) {//清除cookie并跳转到登录页面
@@ -424,11 +432,12 @@ export default {
 
 								let 完整节点路径 = config_JSON.完整节点路径;
 
-								const 链式代理匹配 = 节点备注.match(/\$(socks5|http|https|turn|sstp):\/\/([^#\s]+)/i);
+								const 链式代理匹配 = 节点备注.match(/\$(socks5|socks4a?|ss|http|https|turn|sstp):\/\/([^#\s]+)/i);
 								if (链式代理匹配) {
 									try {
-										const 代理协议 = 链式代理匹配[1].toLowerCase(), 代理参数 = 链式代理匹配[2];
-										const 链式代理数据 = { type: 代理协议, ...获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议)) };
+										const 原始代理协议 = 链式代理匹配[1].toLowerCase(), 代理参数 = 链式代理匹配[2];
+										const 代理协议 = 原始代理协议.startsWith('socks4') ? 'socks4' : 原始代理协议;
+										const 链式代理数据 = { type: 代理协议, ...获取SOCKS5账号(代理参数, 获取代理默认端口(代理协议), true) };
 										完整节点路径 = `/video/${base64SecretEncode(JSON.stringify(链式代理数据), userID) + (config_JSON.启用0RTT ? '?ed=2560' : '')}`;
 										节点备注 = 节点备注.replace(链式代理匹配[0], '').trim() || 节点地址;
 									} catch (error) {
@@ -3218,6 +3227,12 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 				} else if (ctx代理类型 === 'socks5') {
 					log(`[SOCKS5代理] 代理到: ${host}:${portNum}`);
 					newSocket = await socks5Connect(host, portNum, 本次首包数据, TCP连接, ctx代理参数);
+				} else if (ctx代理类型 === 'socks4') {
+					log(`[SOCKS4代理] 代理到: ${host}:${portNum}`);
+					newSocket = await socks4Connect(host, portNum, 本次首包数据, TCP连接, ctx代理参数);
+				} else if (ctx代理类型 === 'ss') {
+					log(`[SS代理] 代理到: ${host}:${portNum}`);
+					newSocket = await shadowsocksConnect(host, portNum, 本次首包数据, TCP连接, ctx代理参数);
 				} else if (ctx代理类型 === 'http') {
 					log(`[HTTP代理] 代理到: ${host}:${portNum}`);
 					newSocket = await httpConnect(host, portNum, 本次首包数据, false, TCP连接, ctx代理参数);
@@ -4000,6 +4015,142 @@ async function socks5Connect(targetHost, targetPort, initialData, TCP连接, par
 		if (有效数据长度(initialData) > 0) await writer.write(initialData);
 		writer.releaseLock(); reader.releaseLock();
 		return socket;
+	} catch (error) {
+		try { writer.releaseLock() } catch (e) { }
+		try { reader.releaseLock() } catch (e) { }
+		try { socket.close() } catch (e) { }
+		throw error;
+	}
+}
+
+async function socks4Connect(targetHost, targetPort, initialData, TCP连接, parsedSocks4) {
+	const { username, hostname, port } = parsedSocks4 || {};
+	const encoder = new TextEncoder();
+	const socket = TCP连接({ hostname, port }), writer = socket.writable.getWriter(), reader = socket.readable.getReader();
+	try {
+		const 目标主机 = stripIPv6Brackets(String(targetHost || ''));
+		if (目标主机.includes(':')) throw new Error('SOCKS4 不支持 IPv6 目标地址');
+		const 用户ID = encoder.encode(username || '');
+		const IPv4匹配 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(目标主机);
+		let 请求包;
+		if (IPv4匹配) {
+			请求包 = 拼接字节数据(new Uint8Array([0x04, 0x01, (targetPort >> 8) & 0xff, targetPort & 0xff]),
+				new Uint8Array(IPv4匹配.slice(1, 5).map(段 => Number(段) & 0xff)),
+				用户ID, new Uint8Array([0x00]));
+		} else {
+			请求包 = 拼接字节数据(new Uint8Array([0x04, 0x01, (targetPort >> 8) & 0xff, targetPort & 0xff, 0x00, 0x00, 0x00, 0x01]),
+				用户ID, new Uint8Array([0x00]), encoder.encode(目标主机), new Uint8Array([0x00]));
+		}
+		await writer.write(请求包);
+		let 响应缓冲 = new Uint8Array(0);
+		while (响应缓冲.byteLength < 8) {
+			const { done, value } = await reader.read();
+			if (done) break;
+			响应缓冲 = 拼接字节数据(响应缓冲, 数据转Uint8Array(value));
+		}
+		if (响应缓冲.byteLength < 8) throw new Error('SOCKS4 响应长度不足');
+		if (响应缓冲[1] !== 0x5a) throw new Error(`SOCKS4 连接失败，响应码: 0x${响应缓冲[1].toString(16)}`);
+		if (有效数据长度(initialData) > 0) await writer.write(数据转Uint8Array(initialData));
+		writer.releaseLock(); reader.releaseLock();
+		if (响应缓冲.byteLength > 8) {
+			const 剩余数据 = 响应缓冲.subarray(8), { readable, writable } = new TransformStream(), 回灌写入器 = writable.getWriter();
+			await 回灌写入器.write(剩余数据);
+			回灌写入器.releaseLock();
+			socket.readable.pipeTo(writable).catch(() => { });
+			return { readable, writable: socket.writable, closed: socket.closed, close: () => socket.close() };
+		}
+		return socket;
+	} catch (error) {
+		try { writer.releaseLock() } catch (e) { }
+		try { reader.releaseLock() } catch (e) { }
+		try { socket.close() } catch (e) { }
+		throw error;
+	}
+}
+
+function 构造SS目标地址(host, port) {
+	const 目标主机 = stripIPv6Brackets(String(host || '')), 端口字节 = new Uint8Array([(port >> 8) & 0xff, port & 0xff]);
+	const IPv4匹配 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(目标主机);
+	if (IPv4匹配) return 拼接字节数据(new Uint8Array([0x01]), new Uint8Array(IPv4匹配.slice(1, 5).map(段 => Number(段) & 0xff)), 端口字节);
+	if (目标主机.includes(':')) {
+		const 段列表 = 目标主机.split('::'), 左段 = 段列表[0] ? 段列表[0].split(':') : [], 右段 = 段列表.length > 1 && 段列表[1] ? 段列表[1].split(':') : [];
+		const 完整段 = [...左段, ...new Array(Math.max(0, 8 - 左段.length - 右段.length)).fill('0'), ...右段];
+		const 地址字节 = new Uint8Array(16);
+		完整段.slice(0, 8).forEach((段, 索引) => { const 值 = parseInt(段 || '0', 16) || 0; 地址字节[索引 * 2] = (值 >> 8) & 0xff; 地址字节[索引 * 2 + 1] = 值 & 0xff });
+		return 拼接字节数据(new Uint8Array([0x04]), 地址字节, 端口字节);
+	}
+	const 域名字节 = new TextEncoder().encode(目标主机);
+	return 拼接字节数据(new Uint8Array([0x03, 域名字节.byteLength]), 域名字节, 端口字节);
+}
+
+async function shadowsocksConnect(targetHost, targetPort, initialData, TCP连接, parsedSS) {
+	const 加密方式 = String(parsedSS?.username || '').toLowerCase(), 密码 = parsedSS?.password || '';
+	const config = SS支持加密配置[加密方式];
+	if (!config) throw new Error(`SS 出站不支持加密方式: ${加密方式 || '(空)'}，可选: ${Object.keys(SS支持加密配置).join(' / ')}`);
+	const socket = TCP连接({ hostname: parsedSS.hostname, port: parsedSS.port }), writer = socket.writable.getWriter(), reader = socket.readable.getReader();
+	try {
+		const 主密钥 = await SS派生主密钥(密码, config.keyLen);
+		const 客户端Salt = crypto.getRandomValues(new Uint8Array(config.saltLen));
+		const 加密密钥 = await SS派生会话密钥(config, 主密钥, 客户端Salt, ['encrypt']);
+		const 加密Nonce = new Uint8Array(SSNonce长度);
+		const 加密整块 = async (明文) => {
+			const 输出块 = [];
+			for (let 偏移 = 0; 偏移 < 明文.byteLength; 偏移 += config.maxChunk) {
+				const 数据块 = 明文.subarray(偏移, Math.min(偏移 + config.maxChunk, 明文.byteLength));
+				const 长度密文 = await SSAEAD加密(加密密钥, 加密Nonce, new Uint8Array([(数据块.byteLength >> 8) & 0x3f, 数据块.byteLength & 0xff]));
+				输出块.push(长度密文, await SSAEAD加密(加密密钥, 加密Nonce, 数据块));
+			}
+			return 拼接字节数据(...输出块);
+		};
+		const 首包明文 = 拼接字节数据(构造SS目标地址(targetHost, targetPort), 有效数据长度(initialData) > 0 ? 数据转Uint8Array(initialData) : new Uint8Array(0));
+		await writer.write(拼接字节数据(客户端Salt, await 加密整块(首包明文)));
+		writer.releaseLock(); reader.releaseLock();
+
+		const 上行加密流 = new TransformStream({
+			async transform(chunk, controller) {
+				try {
+					const 明文 = 数据转Uint8Array(chunk);
+					if (明文.byteLength > 0) controller.enqueue(await 加密整块(明文));
+				} catch (error) { controller.error(error) }
+			}
+		});
+		上行加密流.readable.pipeTo(socket.writable).catch(() => { });
+
+		const 解密状态 = { 缓冲区: new Uint8Array(0), 密钥: null, nonce: new Uint8Array(SSNonce长度), 待读长度: null };
+		const 解密数据 = async (chunk) => {
+			let 缓冲 = 拼接字节数据(解密状态.缓冲区, 数据转Uint8Array(chunk));
+			if (!解密状态.密钥) {
+				if (缓冲.byteLength < config.saltLen) { 解密状态.缓冲区 = 缓冲; return new Uint8Array(0) }
+				const 服务端Salt = 缓冲.subarray(0, config.saltLen);
+				缓冲 = 缓冲.subarray(config.saltLen);
+				解密状态.密钥 = await SS派生会话密钥(config, 主密钥, 服务端Salt, ['decrypt']);
+			}
+			const 输出块 = [];
+			while (true) {
+				if (解密状态.待读长度 === null) {
+					if (缓冲.byteLength < 2 + SSAEAD标签长度) break;
+					const 长度明文 = await SSAEAD解密(解密状态.密钥, 解密状态.nonce, 缓冲.subarray(0, 2 + SSAEAD标签长度));
+					解密状态.待读长度 = ((长度明文[0] << 8) | 长度明文[1]) & config.maxChunk;
+					缓冲 = 缓冲.subarray(2 + SSAEAD标签长度);
+				}
+				if (缓冲.byteLength < 解密状态.待读长度 + SSAEAD标签长度) break;
+				输出块.push(await SSAEAD解密(解密状态.密钥, 解密状态.nonce, 缓冲.subarray(0, 解密状态.待读长度 + SSAEAD标签长度)));
+				缓冲 = 缓冲.subarray(解密状态.待读长度 + SSAEAD标签长度);
+				解密状态.待读长度 = null;
+			}
+			解密状态.缓冲区 = 缓冲;
+			return 输出块.length ? 拼接字节数据(...输出块) : new Uint8Array(0);
+		};
+		const 下行解密流 = new TransformStream({
+			async transform(chunk, controller) {
+				try {
+					const 明文 = await 解密数据(chunk);
+					if (明文.byteLength > 0) controller.enqueue(明文);
+				} catch (error) { controller.error(error) }
+			}
+		});
+		socket.readable.pipeTo(下行解密流.writable).catch(() => { });
+		return { readable: 下行解密流.readable, writable: 上行加密流.writable, closed: socket.closed, close: () => socket.close() };
 	} catch (error) {
 		try { writer.releaseLock() } catch (e) { }
 		try { reader.releaseLock() } catch (e) { }
@@ -6241,6 +6392,215 @@ function 掩码敏感信息(文本, 前缀长度 = 3, 后缀长度 = 2) {
 	return `${前缀}${'*'.repeat(星号数量)}${后缀}`;
 }
 
+function 内置管理页面(env = {}) {
+	const 环境协议 = String(env.PROTOCOL || '').trim();
+	const 转义 = (值) => String(值).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+	const 环境提示 = 环境协议 ? '<div class="warn">检测到环境变量 PROTOCOL=' + 转义(环境协议) + '，它会覆盖页面里的协议类型选择；若要让页面生效，请删除该环境变量。</div>' : '';
+	return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>EdgeTunnel 本地控制台</title>
+<style>
+:root{--bg:#0d1117;--panel:#161b22;--line:#30363d;--text:#e6edf3;--sub:#8b949e;--acc:#3fb950;--warn:#d29922}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--text);font:14px/1.6 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,"Microsoft YaHei",sans-serif}
+.wrap{max-width:960px;margin:0 auto;padding:24px 16px 60px}
+h1{font-size:20px;margin:0 0 4px}
+h2{font-size:15px;margin:0 0 14px;color:var(--text)}
+.muted{color:var(--sub);font-size:12px}
+.panel{background:var(--panel);border:1px solid var(--line);border-radius:10px;padding:18px;margin-top:16px}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:14px}
+label{display:block;font-size:12px;color:var(--sub);margin-bottom:6px}
+select,input[type=text]{width:100%;padding:8px 10px;border-radius:8px;border:1px solid var(--line);background:#0d1117;color:var(--text);font-size:14px;outline:none}
+select:focus,input[type=text]:focus{border-color:var(--acc)}
+.row{display:flex;gap:10px;flex-wrap:wrap;align-items:center;margin-top:14px}
+button{padding:8px 16px;border-radius:8px;border:1px solid var(--line);background:#21262d;color:var(--text);cursor:pointer;font-size:13px}
+button:hover{border-color:var(--acc)}
+button.primary{background:#238636;border-color:#2ea043;color:#fff}
+button.primary:hover{background:#2ea043}
+.note{font-size:12px;color:var(--sub);margin-top:8px}
+textarea{width:100%;min-height:64px;padding:10px;border-radius:8px;border:1px solid var(--line);background:#0d1117;color:var(--text);font:12px/1.5 ui-monospace,SFMono-Regular,Consolas,monospace;resize:vertical;outline:none}
+.warn{margin-top:14px;padding:10px 12px;border:1px solid rgba(210,153,34,.5);background:rgba(210,153,34,.12);color:var(--warn);border-radius:8px;font-size:12px}
+.ok{color:var(--acc)}.bad{color:#f85149}
+table{width:100%;border-collapse:collapse;font-size:13px}
+th,td{padding:8px 10px;border-bottom:1px solid var(--line);text-align:left}
+th{color:var(--sub);font-weight:500;font-size:12px}
+pre{margin:0;padding:10px;background:#0d1117;border:1px solid var(--line);border-radius:8px;font-size:12px;white-space:pre-wrap;word-break:break-all;min-height:20px}
+.tag{display:inline-block;padding:1px 8px;border-radius:20px;font-size:11px;background:rgba(63,185,80,.15);color:var(--acc);border:1px solid rgba(63,185,80,.4)}
+.tag.off{background:rgba(139,148,158,.12);color:var(--sub);border-color:var(--line)}
+</style>
+</head>
+<body>
+<div class="wrap">
+	<h1>EdgeTunnel 本地控制台</h1>
+	<div class="muted">内置管理页 · <span id="hostNow">-</span> · <a href="/logout" style="color:#58a6ff">退出登录</a></div>
+	${环境提示}
+	<div class="panel">
+		<h2>协议与传输</h2>
+		<div class="grid">
+			<div>
+				<label>协议类型</label>
+				<select id="protocol">
+					<option value="vless">VLESS</option>
+					<option value="trojan">Trojan</option>
+					<option value="vmess">VMess（WS / XHTTP）</option>
+					<option value="ss">Shadowsocks（WS 插件）</option>
+				</select>
+			</div>
+			<div>
+				<label>传输协议</label>
+				<select id="transport">
+					<option value="ws">WebSocket</option>
+					<option value="xhttp">XHTTP</option>
+					<option value="grpc">gRPC</option>
+				</select>
+				<div class="note" id="transportNote"></div>
+			</div>
+			<div>
+				<label>SS 加密方式（仅 SS 生效）</label>
+				<select id="ssEnc">
+					<option value="aes-128-gcm">aes-128-gcm</option>
+					<option value="aes-256-gcm">aes-256-gcm</option>
+					<option value="chacha20-ietf-poly1305">chacha20-ietf-poly1305</option>
+				</select>
+			</div>
+			<div>
+				<label>SS 传输 TLS（仅 SS 生效）</label>
+				<select id="ssTls">
+					<option value="true">开启（443）</option>
+					<option value="false">关闭（80）</option>
+				</select>
+			</div>
+		</div>
+		<div class="row">
+			<button class="primary" onclick="save()">保存配置</button>
+			<button onclick="load()">重新读取</button>
+			<span class="muted" id="saveState"></span>
+		</div>
+		<div class="note">切换后保存即写入 KV，客户端需重新拉取订阅或重新导入节点链接。VMess 支持 WS 与 XHTTP，暂不支持 gRPC。</div>
+	</div>
+	<div class="panel">
+		<h2>节点链接</h2>
+		<div class="grid">
+			<div><label>UUID</label><input type="text" id="uuid" readonly></div>
+			<div><label>HOST</label><input type="text" id="host" readonly></div>
+		</div>
+		<label style="margin-top:14px">当前协议节点 LINK</label>
+		<textarea id="link" readonly></textarea>
+		<div class="row">
+			<button onclick="copyText('link')">复制 LINK</button>
+		</div>
+		<label style="margin-top:14px">订阅地址</label>
+		<textarea id="sub" readonly></textarea>
+		<div class="row">
+			<button onclick="copyText('sub')">复制订阅</button>
+			<button onclick="window.open(document.getElementById('sub').value,'_blank')">打开订阅</button>
+		</div>
+	</div>
+	<div class="panel">
+		<h2>ProxyIP / 优选IP / 链式代理 支持情况</h2>
+		<table>
+			<tr><th>能力</th><th>VLESS</th><th>Trojan</th><th>VMess</th><th>SS（入站）</th></tr>
+			<tr><td>ProxyIP 兜底</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td></tr>
+			<tr><td>优选IP / CNAME</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td></tr>
+			<tr><td>链式代理（备注 $socks5:// 等）</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td></tr>
+			<tr><td>gRPC 传输</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag off">不支持</span></td><td><span class="tag off">不支持</span></td></tr>
+		</table>
+		<div class="note">四种入站协议都走同一套 forwardataTCP 出站：ProxyIP、优选IP、以及 SOCKS5/SOCKS4/SS/HTTP/HTTPS/TURN/SSTP 链式代理均对它们生效；IP 是否可用取决于 IP 本身与端口，与协议类型无关。</div>
+	</div>
+	<div class="panel">
+		<h2>出站代理连通性检测</h2>
+		<div class="grid">
+			<div>
+				<label>代理类型</label>
+				<select id="proxyType">
+					<option value="socks5">SOCKS5</option>
+					<option value="socks4">SOCKS4 / SOCKS4a</option>
+					<option value="ss">Shadowsocks</option>
+					<option value="http">HTTP</option>
+					<option value="https">HTTPS</option>
+					<option value="turn">TURN</option>
+					<option value="sstp">SSTP</option>
+				</select>
+			</div>
+			<div style="grid-column:span 2">
+				<label>代理地址</label>
+				<input type="text" id="proxyAddr" placeholder="例如 1.2.3.4:1080 或 user:pass@1.2.3.4:1080；SS 填 加密方式:密码@1.2.3.4:8388">
+			</div>
+		</div>
+		<div class="row"><button onclick="checkProxy()">开始检测</button><span class="muted" id="checkState"></span></div>
+		<pre id="checkResult">—</pre>
+	</div>
+</div>
+<script>
+var CURRENT = null;
+function el(id){ return document.getElementById(id) }
+function copyText(id){
+	var node = el(id), text = node.value || node.textContent || '';
+	var done = function(){ el('saveState').textContent = '已复制'; setTimeout(function(){ el('saveState').textContent = '' }, 1500) };
+	if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done).catch(function(){ node.select(); document.execCommand('copy'); done() });
+	else { node.select(); document.execCommand('copy'); done() }
+}
+function renderTransportNote(){
+	var t = el('transport').value, p = el('protocol').value;
+	var note = '';
+	if (t === 'grpc' && (p === 'vmess' || p === 'ss')) note = '该协议不支持 gRPC，客户端将无法连接。';
+	else if (p === 'ss' && t === 'grpc') note = 'SS 入站仅支持 WS/XHTTP。';
+	else if (p === 'ss') note = 'SS 入站依赖 ray-plugin WebSocket 插件。';
+	el('transportNote').textContent = note;
+}
+async function load(){
+	var res = await fetch('/admin/config.json', { cache: 'no-store' });
+	var cfg = await res.json();
+	CURRENT = cfg;
+	el('protocol').value = cfg.协议类型 || 'vless';
+	el('transport').value = cfg.传输协议 || 'ws';
+	var ss = cfg.SS || {};
+	el('ssEnc').value = ss.加密方式 || 'aes-128-gcm';
+	el('ssTls').value = ss.TLS === false ? 'false' : 'true';
+	el('uuid').value = cfg.UUID || '';
+	el('host').value = cfg.HOST || '';
+	el('hostNow').textContent = location.host;
+	el('link').value = cfg.LINK || '';
+	el('sub').value = location.origin + '/sub?token=' + (cfg.优选订阅生成 && cfg.优选订阅生成.TOKEN ? cfg.优选订阅生成.TOKEN : '');
+	renderTransportNote();
+}
+async function save(){
+	var res = await fetch('/admin/config.json', { cache: 'no-store' });
+	var cfg = await res.json();
+	cfg.协议类型 = el('protocol').value;
+	cfg.传输协议 = el('transport').value;
+	cfg.SS = cfg.SS || {};
+	cfg.SS.加密方式 = el('ssEnc').value;
+	cfg.SS.TLS = el('ssTls').value === 'true';
+	delete cfg.LINK;
+	delete cfg.完整节点路径;
+	el('saveState').textContent = '保存中...';
+	var r = await fetch('/admin/config.json', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(cfg) });
+	var out = await r.json().catch(function(){ return {} });
+	if (r.ok && out.success) { el('saveState').textContent = '已保存'; await load(); }
+	else el('saveState').textContent = '保存失败: ' + (out.error || r.status);
+}
+async function checkProxy(){
+	var type = el('proxyType').value, addr = el('proxyAddr').value.trim();
+	if (!addr) { el('checkState').textContent = '请先填写代理地址'; return }
+	el('checkState').textContent = '检测中...'; el('checkResult').textContent = '—';
+	var res = await fetch('/admin/check?' + type + '=' + encodeURIComponent(addr));
+	var data = await res.json().catch(function(){ return { error: '响应解析失败' } });
+	el('checkResult').textContent = JSON.stringify(data, null, 2);
+	el('checkState').textContent = data.success ? '连接成功' : '连接失败';
+	el('checkState').className = data.success ? 'ok' : 'bad';
+}
+el('protocol').addEventListener('change', renderTransportNote);
+el('transport').addEventListener('change', renderTransportNote);
+load().catch(function(e){ el('saveState').textContent = '读取配置失败: ' + e.message });
+</script>
+</body>
+</html>`;
+}
+
 async function MD5MD5(文本) {
 	const 编码器 = new TextEncoder();
 
@@ -6513,6 +6873,14 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 					全局: "socks5://" + 占位符,
 					标准: "socks5=" + 占位符
 				},
+				SOCKS4: {
+					全局: "socks4://" + 占位符,
+					标准: "socks4=" + 占位符
+				},
+				SS: {
+					全局: "ss://" + 占位符,
+					标准: "ss=" + 占位符
+				},
 				HTTP: {
 					全局: "http://" + 占位符,
 					标准: "http=" + 占位符
@@ -6599,6 +6967,14 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 				全局: "socks5://" + 占位符,
 				标准: "socks5=" + 占位符
 			},
+			SOCKS4: {
+				全局: "socks4://" + 占位符,
+				标准: "socks4=" + 占位符
+			},
+			SS: {
+				全局: "ss://" + 占位符,
+				标准: "ss=" + 占位符
+			},
 			HTTP: {
 				全局: "http://" + 占位符,
 				标准: "http=" + 占位符
@@ -6620,6 +6996,8 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 	if (!config_JSON.反代.路径模板.HTTPS) config_JSON.反代.路径模板.HTTPS = { 全局: "https://" + 占位符, 标准: "https=" + 占位符 };
 	if (!config_JSON.反代.路径模板.TURN) config_JSON.反代.路径模板.TURN = { 全局: "turn://" + 占位符, 标准: "turn=" + 占位符 };
 	if (!config_JSON.反代.路径模板.SSTP) config_JSON.反代.路径模板.SSTP = { 全局: "sstp://" + 占位符, 标准: "sstp=" + 占位符 };
+	if (!config_JSON.反代.路径模板.SOCKS4) config_JSON.反代.路径模板.SOCKS4 = { 全局: "socks4://" + 占位符, 标准: "socks4=" + 占位符 };
+	if (!config_JSON.反代.路径模板.SS) config_JSON.反代.路径模板.SS = { 全局: "ss://" + 占位符, 标准: "ss=" + 占位符 };
 
 	const 代理配置 = config_JSON.反代.路径模板[config_JSON.反代.SOCKS5.启用?.toUpperCase()];
 
@@ -7051,13 +7429,14 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 		try {
 			const 链式代理明文 = base64SecretDecode(链式代理路径匹配[1].replace(/\/+$/, ''), uuid);
 			const { type, ...链式代理地址 } = JSON.parse(链式代理明文);
-			if (!type || !反代协议默认端口[String(type).toLowerCase()]) throw new Error('链式代理类型无效');
+			const 链式代理类型 = String(type || '').toLowerCase().startsWith('socks4') ? 'socks4' : String(type || '').toLowerCase();
+			if (!type || !反代协议默认端口[链式代理类型]) throw new Error('链式代理类型无效');
 			if (!链式代理地址.hostname || !链式代理地址.port) throw new Error('链式代理地址缺少 hostname 或 port');
 			我的SOCKS5账号 = '';
 			反代IP = '链式代理';
 			启用反代兜底 = false;
 			启用SOCKS5全局反代 = true;
-			启用SOCKS5反代 = String(type).toLowerCase();
+			启用SOCKS5反代 = 链式代理类型;
 			parsedSocks5Address = {
 				username: 链式代理地址.username,
 				password: 链式代理地址.password,
@@ -7072,18 +7451,21 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 		}
 	}
 
-	我的SOCKS5账号 = searchParams.get('socks5') || searchParams.get('http') || searchParams.get('https') || searchParams.get('turn') || searchParams.get('sstp') || null;
+	我的SOCKS5账号 = searchParams.get('socks5') || searchParams.get('socks4') || searchParams.get('ss') || searchParams.get('http') || searchParams.get('https') || searchParams.get('turn') || searchParams.get('sstp') || null;
 	启用SOCKS5全局反代 = searchParams.has('globalproxy');
 	if (searchParams.get('socks5')) 启用SOCKS5反代 = 'socks5';
+	else if (searchParams.get('socks4')) 启用SOCKS5反代 = 'socks4';
+	else if (searchParams.get('ss')) 启用SOCKS5反代 = 'ss';
 	else if (searchParams.get('http')) 启用SOCKS5反代 = 'http';
 	else if (searchParams.get('https')) 启用SOCKS5反代 = 'https';
 	else if (searchParams.get('turn')) 启用SOCKS5反代 = 'turn';
 	else if (searchParams.get('sstp')) 启用SOCKS5反代 = 'sstp';
 
 	const 解析代理URL = (值, 强制全局 = true) => {
-		const 匹配 = /^(socks5|http|https|turn|sstp):\/\/(.+)$/i.exec(值 || '');
+		const 匹配 = /^(socks5|socks4a?|ss|http|https|turn|sstp):\/\/(.+)$/i.exec(值 || '');
 		if (!匹配) return false;
 		启用SOCKS5反代 = 匹配[1].toLowerCase();
+		if (启用SOCKS5反代.startsWith('socks4')) 启用SOCKS5反代 = 'socks4';
 		我的SOCKS5账号 = 匹配[2].split('/')[0];
 		if (强制全局) 启用SOCKS5全局反代 = true;
 		return true;
@@ -7124,16 +7506,16 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 			return 反代上下文;
 		}
 	} else {
-		let 匹配 = /\/(socks5?|http|https|turn|sstp):\/?\/?([^/?#\s]+)/i.exec(pathname);
+		let 匹配 = /\/(socks5?|socks4a?|ss|http|https|turn|sstp):\/?\/?([^/?#\s]+)/i.exec(pathname);
 		if (匹配) {
 			const 类型 = 匹配[1].toLowerCase();
-			启用SOCKS5反代 = 类型 === 'sock' || 类型 === 'socks' ? 'socks5' : 类型;
+			启用SOCKS5反代 = 类型 === 'sock' || 类型 === 'socks' ? 'socks5' : (类型.startsWith('socks4') ? 'socks4' : 类型);
 			我的SOCKS5账号 = 匹配[2].split('/')[0];
 			启用SOCKS5全局反代 = true;
-		} else if ((匹配 = /\/(g?s5|socks5|g?http|g?https|g?turn|g?sstp)=([^/?#\s]+)/i.exec(pathname))) {
+		} else if ((匹配 = /\/(g?s5|socks5|socks4a?|ss|g?http|g?https|g?turn|g?sstp)=([^/?#\s]+)/i.exec(pathname))) {
 			const 类型 = 匹配[1].toLowerCase();
 			我的SOCKS5账号 = 匹配[2].split('/')[0];
-			启用SOCKS5反代 = 类型.includes('sstp') ? 'sstp' : (类型.includes('turn') ? 'turn' : (类型.includes('https') ? 'https' : (类型.includes('http') ? 'http' : 'socks5')));
+			启用SOCKS5反代 = 类型.includes('sstp') ? 'sstp' : (类型.includes('turn') ? 'turn' : (类型.includes('https') ? 'https' : (类型.includes('http') ? 'http' : (类型.startsWith('socks4') ? 'socks4' : (类型 === 'ss' ? 'ss' : 'socks5')))));
 			if (类型.startsWith('g')) 启用SOCKS5全局反代 = true;
 		} else if ((匹配 = /\/(proxyip[.=]|pyip=|ip=)([^?#\s]+)/.exec(pathLower))) {
 			const 路径反代值 = 提取路径值(匹配[2]);
@@ -7152,8 +7534,10 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 	}
 
 	try {
-		parsedSocks5Address = await 获取SOCKS5账号(我的SOCKS5账号, 获取代理默认端口(启用SOCKS5反代));
+		parsedSocks5Address = await 获取SOCKS5账号(我的SOCKS5账号, 获取代理默认端口(启用SOCKS5反代), true);
 		if (searchParams.get('socks5')) 启用SOCKS5反代 = 'socks5';
+		else if (searchParams.get('socks4')) 启用SOCKS5反代 = 'socks4';
+		else if (searchParams.get('ss')) 启用SOCKS5反代 = 'ss';
 		else if (searchParams.get('http')) 启用SOCKS5反代 = 'http';
 		else if (searchParams.get('https')) 启用SOCKS5反代 = 'https';
 		else if (searchParams.get('turn')) 启用SOCKS5反代 = 'turn';
@@ -7167,26 +7551,31 @@ async function 反代参数获取(url, uuid, 默认反代IP = '', 默认反代�
 	return 反代上下文;
 }
 
-const 反代协议默认端口 = { socks5: 1080, http: 80, https: 443, turn: 3478, sstp: 443 };
+const 反代协议默认端口 = { socks5: 1080, socks4: 1080, ss: 8388, http: 80, https: 443, turn: 3478, sstp: 443 };
 function 获取代理默认端口(类型) {
 	return 反代协议默认端口[String(类型 || '').toLowerCase()] || 80;
 }
 
 const SOCKS5账号Base64正则 = /^(?:[A-Z0-9+/]{4})*(?:[A-Z0-9+/]{2}==|[A-Z0-9+/]{3}=)?$/i, IPv6方括号正则 = /^\[.*\]$/;
-function 获取SOCKS5账号(address, 默认端口 = 80) {
-	address = String(address || '').trim().replace(/^(socks5|http|https|turn|sstp):\/\//i, '').split('#')[0].trim();
+function 获取SOCKS5账号(address, 默认端口 = 80, 允许仅用户名 = false) {
+	address = String(address || '').trim().replace(/^(socks5|socks4a?|ss|http|https|turn|sstp):\/\//i, '').split('#')[0].trim();
 	const firstAt = address.lastIndexOf("@");
 	if (firstAt !== -1) {
 		let auth = address.slice(0, firstAt).replaceAll("%3D", "=");
-		if (!auth.includes(":") && SOCKS5账号Base64正则.test(auth)) auth = atob(auth);
+		if (!auth.includes(":") && SOCKS5账号Base64正则.test(auth)) {
+			const 解码认证 = atob(auth);
+			if (解码认证.includes(":")) auth = 解码认证;
+		}
 		address = `${auth}@${address.slice(firstAt + 1)}`;
 	}
 
 	const atIndex = address.lastIndexOf("@");
 	const hostPart = (atIndex === -1 ? address : address.slice(atIndex + 1)).split('/')[0];
 	const authPart = atIndex === -1 ? "" : address.slice(0, atIndex);
-	const [username, password] = authPart ? authPart.split(":") : [];
-	if (authPart && !password) throw new Error('无效的 SOCKS 地址格式：认证部分必须是 "username:password" 的形式');
+	const authSepIndex = authPart.indexOf(":");
+	const username = authSepIndex === -1 ? (authPart || undefined) : authPart.slice(0, authSepIndex);
+	const password = authSepIndex === -1 ? undefined : authPart.slice(authSepIndex + 1);
+	if (authPart && password === undefined && !允许仅用户名) throw new Error('无效的 SOCKS 地址格式：认证部分必须是 "username:password" 的形式');
 
 	let hostname = hostPart, port = 默认端口;
 	if (hostPart.includes("]:")) {
