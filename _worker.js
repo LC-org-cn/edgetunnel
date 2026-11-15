@@ -1038,6 +1038,30 @@ async function 读取叉HTTP首包(reader, token) {
 	return null;
 }
 ///////////////////////////////////////////////////////////////////////gRPC传输数据///////////////////////////////////////////////
+// 解析 gRPC 消息体：兼容 gun 的 Hunk 与 multi 的 MultiHunk（field 1 为 bytes，MultiHunk 可重复出现多个数据块）
+function 提取gRPC消息载荷(消息) {
+	const 载荷列表 = [];
+	if (!消息.byteLength) return 载荷列表;
+	let 偏移 = 0;
+	while (偏移 < 消息.byteLength) {
+		if (消息[偏移] !== 0x0a) { 载荷列表.length = 0; break; }
+		偏移++;
+		let 长度 = 0, 位数 = 0, 有效 = false;
+		while (偏移 < 消息.byteLength) {
+			const 当前 = 消息[偏移++];
+			长度 |= (当前 & 0x7f) << 位数;
+			位数 += 7;
+			if ((当前 & 0x80) === 0) { 有效 = true; break; }
+			if (位数 > 28) break;
+		}
+		if (!有效 || 偏移 + 长度 > 消息.byteLength) { 载荷列表.length = 0; break; }
+		载荷列表.push(消息.subarray(偏移, 偏移 + 长度));
+		偏移 += 长度;
+	}
+	// 非标准 protobuf 时保持旧行为：整段作为单个载荷
+	return 载荷列表.length ? 载荷列表 : [消息];
+}
+
 async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 	if (!request.body) return new Response('Bad Request', { status: 400 });
 	const reader = request.body.getReader();
@@ -1213,125 +1237,112 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 						const grpcPayload = pending.subarray(5, frameSize);
 						pending = pending.slice(frameSize);
 						if (!grpcPayload.byteLength) continue;
-						let payload = grpcPayload;
-						if (payload.byteLength >= 2 && payload[0] === 0x0a) {
-							let shift = 0;
-							let offset = 1;
-							let varint有效 = false;
-							while (offset < payload.length) {
-								const current = payload[offset++];
-								if ((current & 0x80) === 0) {
-									varint有效 = true;
-									break;
-								}
-								shift += 7;
-								if (shift > 35) break;
+						const 载荷列表 = 提取gRPC消息载荷(grpcPayload);
+						for (const payload of 载荷列表) {
+							if (!payload.byteLength) continue;
+							if (isDnsQuery) {
+								if (判断是否是木马) await 转发木马UDP数据(payload, grpcBridge, 木马UDP上下文, request);
+								else await forwardataudp(payload, grpcBridge, null, request);
+								continue;
 							}
-							if (varint有效) payload = payload.subarray(offset);
-						}
-						if (!payload.byteLength) continue;
-						if (isDnsQuery) {
-							if (判断是否是木马) await 转发木马UDP数据(payload, grpcBridge, 木马UDP上下文, request);
-							else await forwardataudp(payload, grpcBridge, null, request);
-							continue;
-						}
-						if (remoteConnWrapper.socket || remoteConnWrapper.connectingPromise || VMessUDP转发器) {
-							if (VMess会话实例) {
-								const VMess结果 = await VMess会话实例.输入(payload);
-								if (VMessUDP转发器) await VMessUDP转发器.处理(VMess结果.明文);
-								else for (const 明文块 of VMess结果.明文) {
-									if (明文块.byteLength && !(await 写入远端(明文块))) throw new Error('Remote socket is not ready');
-								}
-							} else if (!(await 写入远端(payload))) throw new Error('Remote socket is not ready');
-						} else {
-							const 首包bytes = GRPC首包缓存.byteLength ? 拼接字节数据(GRPC首包缓存, 数据转Uint8Array(payload)) : 数据转Uint8Array(payload);
-							if (判断是否是木马 === null) 判断是否是木马 = 首包bytes.byteLength >= 58 ? (首包bytes[56] === 0x0d && 首包bytes[57] === 0x0a) : null;
-							if (判断是否是木马) {
-								const 解析结果 = 解析木马请求(首包bytes, yourUUID);
-								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid trojan request');
-								GRPC首包缓存 = new Uint8Array(0);
-								const { port, hostname, rawClientData, isUDP } = 解析结果;
-								log(`[gRPC] 木马首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
-								if (isSpeedTestSite(hostname) && 反代上下文.代理类型 === null) {
-									grpcBridge.send(构造本地204响应());
-									return;
-								}
-								if (isUDP) {
-									isDnsQuery = true;
-									木马UDP上下文.目标主机 = hostname;
-									木马UDP上下文.目标端口 = port;
-									if (木马UDP上下文.反代地址) await 转发木马UDP数据(首包bytes, grpcBridge, 木马UDP上下文, request);
-									else if (有效数据长度(rawClientData) > 0) await 转发木马UDP数据(rawClientData, grpcBridge, 木马UDP上下文, request);
-								} else {
-									await forwardataTCP(hostname, port, rawClientData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文, true, 首包bytes);
-								}
+							if (remoteConnWrapper.socket || remoteConnWrapper.connectingPromise || VMessUDP转发器) {
+								if (VMess会话实例) {
+									const VMess结果 = await VMess会话实例.输入(payload);
+									if (VMessUDP转发器) await VMessUDP转发器.处理(VMess结果.明文);
+									else for (const 明文块 of VMess结果.明文) {
+										if (明文块.byteLength && !(await 写入远端(明文块))) throw new Error('Remote socket is not ready');
+									}
+								} else if (!(await 写入远端(payload))) throw new Error('Remote socket is not ready');
 							} else {
-								判断是否是木马 = false;
-								const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID);
-								if (!解析结果?.hasError) {
+								const 首包bytes = GRPC首包缓存.byteLength ? 拼接字节数据(GRPC首包缓存, 数据转Uint8Array(payload)) : 数据转Uint8Array(payload);
+								if (判断是否是木马 === null) 判断是否是木马 = 首包bytes.byteLength >= 58 ? (首包bytes[56] === 0x0d && 首包bytes[57] === 0x0a) : null;
+								if (判断是否是木马) {
+									const 解析结果 = 解析木马请求(首包bytes, yourUUID);
+									if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid trojan request');
 									GRPC首包缓存 = new Uint8Array(0);
-									const { port, hostname, version, isUDP, rawClientData } = 解析结果;
-									log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
-									const respHeader = new Uint8Array([version, 0]);
+									const { port, hostname, rawClientData, isUDP } = 解析结果;
+									log(`[gRPC] 木马首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
 									if (isSpeedTestSite(hostname) && 反代上下文.代理类型 === null) {
-										grpcBridge.send(构造本地204响应(respHeader));
+										grpcBridge.send(构造本地204响应());
 										return;
 									}
 									if (isUDP) {
-										if (port !== 53) throw new Error('UDP is not supported');
 										isDnsQuery = true;
+										木马UDP上下文.目标主机 = hostname;
+										木马UDP上下文.目标端口 = port;
+										if (木马UDP上下文.反代地址) await 转发木马UDP数据(首包bytes, grpcBridge, 木马UDP上下文, request);
+										else if (有效数据长度(rawClientData) > 0) await 转发木马UDP数据(rawClientData, grpcBridge, 木马UDP上下文, request);
+									} else {
+										await forwardataTCP(hostname, port, rawClientData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文, true, 首包bytes);
 									}
-									grpcBridge.send(respHeader);
-									const rawData = rawClientData;
-									if (isDnsQuery) {
-										if (判断是否是木马) await 转发木马UDP数据(rawData, grpcBridge, 木马UDP上下文, request);
-										else await forwardataudp(rawData, grpcBridge, null, request);
-									}
-									else await forwardataTCP(hostname, port, rawData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文);
 								} else {
-									const VMess解析结果 = await 尝试解析VMess请求(首包bytes, yourUUID);
-									if (VMess解析结果.状态 === 'need_more' && 首包bytes.byteLength < 4096) {
-										GRPC首包缓存 = 首包bytes;
-										continue;
-									}
-									if (VMess解析结果.状态 !== 'ok') throw new Error(解析结果.message || VMess解析结果.原因 || 'Invalid request');
-									GRPC首包缓存 = new Uint8Array(0);
-									const { hostname, port, isUDP } = VMess解析结果.首包;
-									log(`[gRPC] VMess首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
-									VMess会话实例 = VMess解析结果.会话;
-									const 首包明文 = VMess解析结果.明文?.length ? VMess拼接(...VMess解析结果.明文) : VMess空字节;
-									if (isUDP) {
-										if (port !== 53) throw new Error('UDP is not supported');
-										grpcBridge.send(await VMess会话实例.生成响应头());
-										VMessUDP转发器 = 创建VMessUDP转发器(VMess会话实例, grpcBridge, request);
-										await VMessUDP转发器.处理(首包明文.byteLength ? [首包明文] : []);
-										continue;
-									}
-									const 远端socket = await forwardataTCP(hostname, port, 首包明文, { readyState: WebSocket.OPEN }, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, true);
-									if (!远端socket) throw new Error('VMess remote socket unavailable');
-									grpcBridge.send(await VMess会话实例.生成响应头());
-									void (async () => {
-										try {
-											const 远端读取器 = 远端socket.readable.getReader();
-											try {
-												while (true) {
-													const { done, value } = await 远端读取器.read();
-													if (done) break;
-													const 密文 = await VMess会话实例.加密下行(数据转Uint8Array(value));
-													if (密文.byteLength) grpcBridge.send(密文);
-												}
-											} finally {
-												try { 远端读取器.releaseLock() } catch (e) { }
-											}
-											const 结束块 = await VMess会话实例.结束下行();
-											if (结束块.byteLength) grpcBridge.send(结束块);
-										} catch (err) {
-											log(`[gRPC-VMess] 下行结束: ${err?.message || err}`);
-											try { 远端socket.close() } catch (e) { }
-										} finally {
-											grpcBridge.close();
+									判断是否是木马 = false;
+									const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID);
+									if (!解析结果?.hasError) {
+										GRPC首包缓存 = new Uint8Array(0);
+										const { port, hostname, version, isUDP, rawClientData } = 解析结果;
+										log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
+										const respHeader = new Uint8Array([version, 0]);
+										if (isSpeedTestSite(hostname) && 反代上下文.代理类型 === null) {
+											grpcBridge.send(构造本地204响应(respHeader));
+											return;
 										}
-									})();
+										if (isUDP) {
+											if (port !== 53) throw new Error('UDP is not supported');
+											isDnsQuery = true;
+										}
+										grpcBridge.send(respHeader);
+										const rawData = rawClientData;
+										if (isDnsQuery) {
+											if (判断是否是木马) await 转发木马UDP数据(rawData, grpcBridge, 木马UDP上下文, request);
+											else await forwardataudp(rawData, grpcBridge, null, request);
+										}
+										else await forwardataTCP(hostname, port, rawData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文);
+									} else {
+										const VMess解析结果 = await 尝试解析VMess请求(首包bytes, yourUUID);
+										if (VMess解析结果.状态 === 'need_more' && 首包bytes.byteLength < 4096) {
+											GRPC首包缓存 = 首包bytes;
+											continue;
+										}
+										if (VMess解析结果.状态 !== 'ok') throw new Error(解析结果.message || VMess解析结果.原因 || 'Invalid request');
+										GRPC首包缓存 = new Uint8Array(0);
+										const { hostname, port, isUDP } = VMess解析结果.首包;
+										log(`[gRPC] VMess首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
+										VMess会话实例 = VMess解析结果.会话;
+										const 首包明文 = VMess解析结果.明文?.length ? VMess拼接(...VMess解析结果.明文) : VMess空字节;
+										if (isUDP) {
+											if (port !== 53) throw new Error('UDP is not supported');
+											grpcBridge.send(await VMess会话实例.生成响应头());
+											VMessUDP转发器 = 创建VMessUDP转发器(VMess会话实例, grpcBridge, request);
+											await VMessUDP转发器.处理(首包明文.byteLength ? [首包明文] : []);
+											continue;
+										}
+										const 远端socket = await forwardataTCP(hostname, port, 首包明文, { readyState: WebSocket.OPEN }, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, true);
+										if (!远端socket) throw new Error('VMess remote socket unavailable');
+										grpcBridge.send(await VMess会话实例.生成响应头());
+										void (async () => {
+											try {
+												const 远端读取器 = 远端socket.readable.getReader();
+												try {
+													while (true) {
+														const { done, value } = await 远端读取器.read();
+														if (done) break;
+														const 密文 = await VMess会话实例.加密下行(数据转Uint8Array(value));
+														if (密文.byteLength) grpcBridge.send(密文);
+													}
+												} finally {
+													try { 远端读取器.releaseLock() } catch (e) { }
+												}
+												const 结束块 = await VMess会话实例.结束下行();
+												if (结束块.byteLength) grpcBridge.send(结束块);
+											} catch (err) {
+												log(`[gRPC-VMess] 下行结束: ${err?.message || err}`);
+												try { 远端socket.close() } catch (e) { }
+											} finally {
+												grpcBridge.close();
+											}
+										})();
+									}
 								}
 							}
 						}
@@ -2943,7 +2954,10 @@ function VMess文本Base64(文本) {
 
 function 构造VMess链接({ 地址, 端口, UUID, 备注, 传输协议 = 'ws', 路径 = '/', 主机名, TLS = true, SNI, ALPN = '', 指纹 = 'chrome', 加密方式 = 'auto' }) {
 	// 传输协议可能带参数（如 grpc&mode=gun、xhttp&mode=stream-one&extra=...），VMess JSON 的 net 只接受基础类型
-	const 传输类型 = String(传输协议).split('&')[0].toLowerCase();
+	const 传输协议文本 = String(传输协议);
+	const 传输类型 = 传输协议文本.split('&')[0].toLowerCase();
+	// v2rayN/Xray 以 type=gun/multi 区分 gRPC 的 gun 与 multi 模式
+	const gRPC模式 = /(?:^|&)mode=multi(?:&|$)/.test(传输协议文本) ? 'multi' : 'gun';
 	const 节点 = {
 		v: '2',
 		ps: 备注 || 地址,
@@ -2953,7 +2967,7 @@ function 构造VMess链接({ 地址, 端口, UUID, 备注, 传输协议 = 'ws', 
 		aid: '0',
 		scy: 加密方式,
 		net: 传输类型,
-		type: 传输类型 === 'grpc' ? 'gun' : (传输类型 === 'xhttp' ? 'stream-up' : 'none'),
+		type: 传输类型 === 'grpc' ? gRPC模式 : (传输类型 === 'xhttp' ? 'stream-up' : 'none'),
 		host: 主机名 || 地址,
 		path: 路径 || (传输类型 === 'grpc' ? '' : '/'),
 		tls: TLS ? 'tls' : '',
@@ -6626,6 +6640,13 @@ pre{margin:0;padding:10px;background:#0d1117;border:1px solid var(--line);border
 				</select>
 				<div class="note" id="transportNote"></div>
 			</div>
+			<div id="grpcModeBox" style="display:none">
+				<label>gRPC 模式</label>
+				<select id="grpcMode">
+					<option value="gun">gun（单流）</option>
+					<option value="multi">multi（多流）</option>
+				</select>
+			</div>
 			<div>
 				<label>SS 加密方式（仅 SS 生效）</label>
 				<select id="ssEnc">
@@ -6647,7 +6668,7 @@ pre{margin:0;padding:10px;background:#0d1117;border:1px solid var(--line);border
 			<button onclick="load()">重新读取</button>
 			<span class="muted" id="saveState"></span>
 		</div>
-		<div class="note">切换后保存即写入 KV，客户端需重新拉取订阅或重新导入节点链接。VMess 支持 WS、XHTTP 与 gRPC（gun 单流模式）。</div>
+		<div class="note">切换后保存即写入 KV，客户端需重新拉取订阅或重新导入节点链接。VMess 支持 WS、XHTTP 与 gRPC（gun/multi）。</div>
 	</div>
 	<div class="panel">
 		<h2>节点链接</h2>
@@ -6674,7 +6695,7 @@ pre{margin:0;padding:10px;background:#0d1117;border:1px solid var(--line);border
 			<tr><td>ProxyIP 兜底</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td></tr>
 			<tr><td>优选IP / CNAME</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td></tr>
 			<tr><td>链式代理（备注 $socks5:// 等）</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td></tr>
-			<tr><td>gRPC 传输</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag off">不支持</span></td><td><span class="tag off">不支持</span></td></tr>
+			<tr><td>gRPC 传输</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持（gun/multi）</span></td><td><span class="tag off">不支持</span></td></tr>
 		</table>
 		<div class="note">四种入站协议都走同一套 forwardataTCP 出站：ProxyIP、优选IP、以及 SOCKS5/SOCKS4/SS/HTTP/HTTPS/TURN/SSTP 链式代理均对它们生效；IP 是否可用取决于 IP 本身与端口，与协议类型无关。</div>
 	</div>
@@ -6718,8 +6739,9 @@ function syncTransport(){
 	if (allow.indexOf(t.value) === -1) t.value = 'ws';
 	var note = '';
 	if (p === 'ss') note = 'SS 入站仅支持 WebSocket（ray-plugin）传输。';
-	else if (p === 'vmess') note = 'VMess 支持 WebSocket / XHTTP / gRPC 传输（gRPC 为 gun 单流模式）。';
+	else if (p === 'vmess') note = 'VMess 支持 WebSocket / XHTTP / gRPC 传输（gRPC 可选 gun 单流或 multi 多流）。';
 	el('transportNote').textContent = note;
+	el('grpcModeBox').style.display = t.value === 'grpc' ? '' : 'none';
 }
 async function load(){
 	var res = await fetch('/admin/config.json', { cache: 'no-store' });
@@ -6728,6 +6750,7 @@ async function load(){
 	var 当前协议 = cfg.协议类型 || 'vless';
 	el('protocol').value = TRANSPORT_ALLOW[当前协议] ? 当前协议 : 'vless';
 	el('transport').value = cfg.传输协议 || 'ws';
+	el('grpcMode').value = cfg.gRPC模式 === 'multi' ? 'multi' : 'gun';
 	var ss = cfg.SS || {};
 	el('ssEnc').value = ss.加密方式 || 'aes-128-gcm';
 	el('ssTls').value = ss.TLS === false ? 'false' : 'true';
@@ -6743,6 +6766,7 @@ async function save(){
 	var cfg = await res.json();
 	cfg.协议类型 = el('protocol').value;
 	cfg.传输协议 = el('transport').value;
+	cfg.gRPC模式 = el('grpcMode').value === 'multi' ? 'multi' : 'gun';
 	cfg.SS = cfg.SS || {};
 	cfg.SS.加密方式 = el('ssEnc').value;
 	cfg.SS.TLS = el('ssTls').value === 'true';
@@ -7128,7 +7152,7 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 	else if (!config_JSON.PATH) config_JSON.PATH = '/';
 	if (!config_JSON.ALPN) config_JSON.ALPN = "";
 
-	if (!config_JSON.gRPC模式) config_JSON.gRPC模式 = 'gun';
+	if (!['gun', 'multi'].includes(config_JSON.gRPC模式)) config_JSON.gRPC模式 = 'gun';
 	if (!config_JSON.SS) config_JSON.SS = { 加密方式: "aes-128-gcm", TLS: false };
 	// 归一化不支持的协议/传输组合，避免生成无法连接的节点链接
 	if (config_JSON.协议类型 === 'ss' && config_JSON.传输协议 !== 'ws') config_JSON.传输协议 = 'ws';
