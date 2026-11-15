@@ -1,4 +1,5 @@
-﻿const Version = '2026-11-15 22:00:00';
+﻿import { connect as 系统TCP连接 } from 'cloudflare:sockets';
+const Version = '2026-11-15 23:30:00';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
 const Pages静态页面 = 'https://edt-pages.github.io', EDT_版本号 = Number(String(Version).replace(/\D+/g, ''));
@@ -4926,10 +4927,31 @@ async function httpsConnect(targetHost, targetPort, initialData, TCP连接, pars
 }
 
 function 创建请求TCP连接器(request) {
-	const 请求对象 = /** @type {any} */ (request);
-	const fetcher = 请求对象?.fetcher;
-	if (!fetcher || typeof fetcher.connect !== 'function') throw new Error('request.fetcher.connect unavailable');
-	return (options, init) => init === undefined ? fetcher.connect(options) : fetcher.connect(options, init);
+	let fetcher = null;
+	try {
+		const 请求对象 = /** @type {any} */ (request);
+		const 候选 = 请求对象?.fetcher;
+		if (候选 && typeof 候选.connect === 'function') fetcher = 候选;
+	} catch (e) { }
+	// Pages 等环境可能不提供 request.fetcher.connect，回退到官方 cloudflare:sockets
+	const 备用连接 = typeof 系统TCP连接 === 'function' ? 系统TCP连接 : null;
+	if (!fetcher) {
+		if (!备用连接) throw new Error('TCP 连接器不可用');
+		return (options, init) => init === undefined ? 备用连接(options) : 备用连接(options, init);
+	}
+	let 已降级 = false;
+	return (options, init) => {
+		if (!已降级) {
+			try {
+				return init === undefined ? fetcher.connect(options) : fetcher.connect(options, init);
+			} catch (error) {
+				已降级 = true;
+				if (!备用连接) throw error;
+				log(`[TCP拨号] request.fetcher.connect 不可用，改用 cloudflare:sockets connect(): ${error?.message || error}`);
+			}
+		}
+		return init === undefined ? 备用连接(options) : 备用连接(options, init);
+	};
 }
 ////////////////////////////////////////////TLSClient by: @Alexandre_Kojeve////////////////////////////////////////////////
 const TLS_VERSION_10 = 769, TLS_VERSION_12 = 771, TLS_VERSION_13 = 772;
