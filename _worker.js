@@ -451,10 +451,10 @@ export default {
 
 								if (协议类型 === 'vmess') {
 									const 传输路径参数值 = 获取传输路径参数值(config_JSON, 完整节点路径, 作为优选订阅生成器);
-									return 构造VMess链接({ 地址: 节点地址, 端口: 节点端口, UUID: config_JSON.UUID, 备注: 节点备注, 传输协议, 路径: 传输路径参数值, 主机名: config_JSON.HOST, TLS: true, SNI: config_JSON.HOST, ALPN: config_JSON.ALPN, 指纹: config_JSON.Fingerprint });
+									return 构造VMess链接({ 地址: 节点地址, 端口: 节点端口, UUID: 作为优选订阅生成器 ? '00000000-0000-4000-8000-000000000000' : config_JSON.UUID, 备注: 节点备注, 传输协议, 路径: 传输路径参数值, 主机名: 作为优选订阅生成器 ? 'example.com' : config_JSON.HOST, TLS: true, SNI: 作为优选订阅生成器 ? 'example.com' : config_JSON.HOST, ALPN: config_JSON.ALPN, 指纹: config_JSON.Fingerprint });
 								}
 
-								if (协议类型 === 'ss' && !作为优选订阅生成器) {
+								if (协议类型 === 'ss') {
 									if (!config_JSON.SS.TLS) {
 										const TLS端口 = [443, 2053, 2083, 2087, 2096, 8443];
 										const NOTLS端口 = [80, 2052, 2082, 2086, 2095, 8080];
@@ -462,7 +462,7 @@ export default {
 									}
 									完整节点路径 = (完整节点路径.includes('?') ? 完整节点路径.replace('?', '?enc=' + config_JSON.SS.加密方式 + '&') : (完整节点路径 + '?enc=' + config_JSON.SS.加密方式)).replace(/([=,])/g, '\\$1');
 									if (!isSubConverterRequest) 完整节点路径 = 完整节点路径 + ';mux=0';
-									return `${协议类型}://${btoa(config_JSON.SS.加密方式 + ':00000000-0000-4000-8000-000000000000')}@${节点地址}:${节点端口}?plugin=v2${encodeURIComponent('ray-plugin;mode=websocket;host=example.com;path=' + (config_JSON.随机路径 ? 随机路径(完整节点路径) : 完整节点路径) + (config_JSON.SS.TLS ? ';tls' : '')) + ECHLINK参数 + TLS分片参数}#${encodeURIComponent(节点备注)}`;
+									return `${协议类型}://${btoa(config_JSON.SS.加密方式 + ':00000000-0000-4000-8000-000000000000')}@${节点地址}:${节点端口}?plugin=v2${encodeURIComponent('ray-plugin;mode=websocket;host=example.com;path=' + 获取传输路径参数值(config_JSON, 完整节点路径, 作为优选订阅生成器) + (config_JSON.SS.TLS ? ';tls' : '')) + ECHLINK参数 + TLS分片参数}#${encodeURIComponent(节点备注)}`;
 								} else {
 									const 传输路径参数值 = 获取传输路径参数值(config_JSON, 完整节点路径, 作为优选订阅生成器);
 									return `${协议类型}://00000000-0000-4000-8000-000000000000@${节点地址}:${节点端口}?security=tls&type=${传输协议 + ECHLINK参数}&${域名字段名}=example.com&fp=${config_JSON.Fingerprint}&sni=example.com&${路径字段名}=${encodeURIComponent(传输路径参数值) + TLS分片参数}&encryption=none&alpn=${encodeURIComponent(config_JSON.ALPN)}#${encodeURIComponent(节点备注)}`;
@@ -1028,6 +1028,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 	let isDnsQuery = false;
 	const 木马UDP上下文 = { 缓存: new Uint8Array(0), 反代地址: 反代上下文.木马反代地址 };
 	let 判断是否是木马 = null;
+	let VMess会话实例 = null;
 	let 当前写入Socket = null;
 	let 远端写入器 = null;
 	let GRPC上行写入队列 = null;
@@ -1215,7 +1216,12 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 							continue;
 						}
 						if (remoteConnWrapper.socket || remoteConnWrapper.connectingPromise) {
-							if (!(await 写入远端(payload))) throw new Error('Remote socket is not ready');
+							if (VMess会话实例) {
+								const VMess结果 = await VMess会话实例.输入(payload);
+								for (const 明文块 of VMess结果.明文) {
+									if (明文块.byteLength && !(await 写入远端(明文块))) throw new Error('Remote socket is not ready');
+								}
+							} else if (!(await 写入远端(payload))) throw new Error('Remote socket is not ready');
 						} else {
 							const 首包bytes = 数据转Uint8Array(payload);
 							if (判断是否是木马 === null) 判断是否是木马 = 首包bytes.byteLength >= 58 && 首包bytes[56] === 0x0d && 首包bytes[57] === 0x0a;
@@ -1240,25 +1246,59 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 							} else {
 								判断是否是木马 = false;
 								const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID);
-								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid 魏烈思 request');
-								const { port, hostname, version, isUDP, rawClientData } = 解析结果;
-								log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
-								const respHeader = new Uint8Array([version, 0]);
-								if (isSpeedTestSite(hostname) && 反代上下文.代理类型 === null) {
-									grpcBridge.send(构造本地204响应(respHeader));
-									return;
+								if (!解析结果?.hasError) {
+									const { port, hostname, version, isUDP, rawClientData } = 解析结果;
+									log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
+									const respHeader = new Uint8Array([version, 0]);
+									if (isSpeedTestSite(hostname) && 反代上下文.代理类型 === null) {
+										grpcBridge.send(构造本地204响应(respHeader));
+										return;
+									}
+									if (isUDP) {
+										if (port !== 53) throw new Error('UDP is not supported');
+										isDnsQuery = true;
+									}
+									grpcBridge.send(respHeader);
+									const rawData = rawClientData;
+									if (isDnsQuery) {
+										if (判断是否是木马) await 转发木马UDP数据(rawData, grpcBridge, 木马UDP上下文, request);
+										else await forwardataudp(rawData, grpcBridge, null, request);
+									}
+									else await forwardataTCP(hostname, port, rawData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文);
+								} else {
+									const VMess解析结果 = await 尝试解析VMess请求(首包bytes, yourUUID);
+									if (VMess解析结果.状态 !== 'ok') throw new Error(解析结果.message || VMess解析结果.原因 || 'Invalid request');
+									const { hostname, port, isUDP } = VMess解析结果.首包;
+									log(`[gRPC] VMess首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
+									if (isUDP) throw new Error('UDP is not supported');
+									VMess会话实例 = VMess解析结果.会话;
+									const 首包明文 = VMess解析结果.明文?.length ? VMess拼接(...VMess解析结果.明文) : VMess空字节;
+									const 远端socket = await forwardataTCP(hostname, port, 首包明文, { readyState: WebSocket.OPEN }, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, true);
+									if (!远端socket) throw new Error('VMess remote socket unavailable');
+									grpcBridge.send(await VMess会话实例.生成响应头());
+									void (async () => {
+										try {
+											const 远端读取器 = 远端socket.readable.getReader();
+											try {
+												while (true) {
+													const { done, value } = await 远端读取器.read();
+													if (done) break;
+													const 密文 = await VMess会话实例.加密下行(数据转Uint8Array(value));
+													if (密文.byteLength) grpcBridge.send(密文);
+												}
+											} finally {
+												try { 远端读取器.releaseLock() } catch (e) { }
+											}
+											const 结束块 = await VMess会话实例.结束下行();
+											if (结束块.byteLength) grpcBridge.send(结束块);
+										} catch (err) {
+											log(`[gRPC-VMess] 下行结束: ${err?.message || err}`);
+											try { 远端socket.close() } catch (e) { }
+										} finally {
+											grpcBridge.close();
+										}
+									})();
 								}
-								if (isUDP) {
-									if (port !== 53) throw new Error('UDP is not supported');
-									isDnsQuery = true;
-								}
-								grpcBridge.send(respHeader);
-								const rawData = rawClientData;
-								if (isDnsQuery) {
-									if (判断是否是木马) await 转发木马UDP数据(rawData, grpcBridge, 木马UDP上下文, request);
-									else await forwardataudp(rawData, grpcBridge, null, request);
-								}
-								else await forwardataTCP(hostname, port, rawData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文);
 							}
 						}
 					}
@@ -2840,6 +2880,8 @@ function VMess文本Base64(文本) {
 }
 
 function 构造VMess链接({ 地址, 端口, UUID, 备注, 传输协议 = 'ws', 路径 = '/', 主机名, TLS = true, SNI, ALPN = '', 指纹 = 'chrome', 加密方式 = 'auto' }) {
+	// 传输协议可能带参数（如 grpc&mode=gun、xhttp&mode=stream-one&extra=...），VMess JSON 的 net 只接受基础类型
+	const 传输类型 = String(传输协议).split('&')[0].toLowerCase();
 	const 节点 = {
 		v: '2',
 		ps: 备注 || 地址,
@@ -2848,10 +2890,10 @@ function 构造VMess链接({ 地址, 端口, UUID, 备注, 传输协议 = 'ws', 
 		id: UUID,
 		aid: '0',
 		scy: 加密方式,
-		net: 传输协议,
-		type: 传输协议 === 'grpc' ? 'gun' : (传输协议 === 'xhttp' ? 'stream-up' : 'none'),
+		net: 传输类型,
+		type: 传输类型 === 'grpc' ? 'gun' : (传输类型 === 'xhttp' ? 'stream-up' : 'none'),
 		host: 主机名 || 地址,
-		path: 路径 || (传输协议 === 'grpc' ? '' : '/'),
+		path: 路径 || (传输类型 === 'grpc' ? '' : '/'),
 		tls: TLS ? 'tls' : '',
 		sni: SNI || 主机名 || 地址,
 		alpn: ALPN || '',
@@ -6455,7 +6497,7 @@ pre{margin:0;padding:10px;background:#0d1117;border:1px solid var(--line);border
 				<select id="protocol">
 					<option value="vless">VLESS</option>
 					<option value="trojan">Trojan</option>
-					<option value="vmess">VMess（WS / XHTTP）</option>
+					<option value="vmess">VMess（WS / XHTTP / gRPC）</option>
 					<option value="ss">Shadowsocks（WS 插件）</option>
 				</select>
 			</div>
@@ -6489,7 +6531,7 @@ pre{margin:0;padding:10px;background:#0d1117;border:1px solid var(--line);border
 			<button onclick="load()">重新读取</button>
 			<span class="muted" id="saveState"></span>
 		</div>
-		<div class="note">切换后保存即写入 KV，客户端需重新拉取订阅或重新导入节点链接。VMess 支持 WS 与 XHTTP，暂不支持 gRPC。</div>
+		<div class="note">切换后保存即写入 KV，客户端需重新拉取订阅或重新导入节点链接。VMess 支持 WS、XHTTP 与 gRPC（gun 单流模式）。</div>
 	</div>
 	<div class="panel">
 		<h2>节点链接</h2>
@@ -6553,14 +6595,14 @@ function copyText(id){
 	if (navigator.clipboard && window.isSecureContext) navigator.clipboard.writeText(text).then(done).catch(function(){ node.select(); document.execCommand('copy'); done() });
 	else { node.select(); document.execCommand('copy'); done() }
 }
-var TRANSPORT_ALLOW = { vless: ['ws','xhttp','grpc'], trojan: ['ws','xhttp','grpc'], vmess: ['ws','xhttp'], ss: ['ws'] };
+var TRANSPORT_ALLOW = { vless: ['ws','xhttp','grpc'], trojan: ['ws','xhttp','grpc'], vmess: ['ws','xhttp','grpc'], ss: ['ws'] };
 function syncTransport(){
 	var p = el('protocol').value, t = el('transport'), allow = TRANSPORT_ALLOW[p] || ['ws'];
 	Array.prototype.forEach.call(t.options, function(o){ o.disabled = allow.indexOf(o.value) === -1 });
 	if (allow.indexOf(t.value) === -1) t.value = 'ws';
 	var note = '';
 	if (p === 'ss') note = 'SS 入站仅支持 WebSocket（ray-plugin）传输。';
-	else if (p === 'vmess') note = 'VMess 支持 WebSocket / XHTTP，不支持 gRPC。';
+	else if (p === 'vmess') note = 'VMess 支持 WebSocket / XHTTP / gRPC 传输（gRPC 为 gun 单流模式）。';
 	el('transportNote').textContent = note;
 }
 async function load(){
@@ -6974,7 +7016,6 @@ async function 读取config_JSON(env, hostname, userID, UA = "Mozilla/5.0", 重�
 	if (!config_JSON.SS) config_JSON.SS = { 加密方式: "aes-128-gcm", TLS: false };
 	// 归一化不支持的协议/传输组合，避免生成无法连接的节点链接
 	if (config_JSON.协议类型 === 'ss' && config_JSON.传输协议 !== 'ws') config_JSON.传输协议 = 'ws';
-	if (config_JSON.协议类型 === 'vmess' && config_JSON.传输协议 === 'grpc') config_JSON.传输协议 = 'ws';
 
 	if (!config_JSON.反代.路径模板?.[_p]) {
 		config_JSON.反代.路径模板 = {
@@ -7201,6 +7242,35 @@ async function 获取优选订阅生成器数据(优选订阅生成器HOST, uid 
 
 		for (const 行内容 of 订阅行列表) {
 			if (!行内容.trim()) continue; // 跳过空行
+			const 去空行内容 = 行内容.trim();
+			// VMess：占位符位于 base64 JSON 内，需要解码判断
+			if (/^vmess:\/\//i.test(去空行内容)) {
+				let 已解析 = false;
+				try {
+					const VMess节点 = JSON.parse(atob(去空行内容.slice(8).split('#')[0]));
+					const 是占位节点 = VMess节点.id === '00000000-0000-4000-8000-000000000000' &&
+						[VMess节点.host, VMess节点.sni].some(值 => String(值 || '').toLowerCase().includes('example.com'));
+					if (是占位节点 && VMess节点.add) {
+						优选IP.push(`${VMess节点.add}:${VMess节点.port || 443}#${VMess节点.ps || VMess节点.add}`);
+						已解析 = true;
+					}
+				} catch (error) { }
+				if (!已解析) 其他节点LINK += 行内容 + '\n';
+				continue;
+			}
+			// SS：凭据为 base64(method:占位UUID)，需要解码判断
+			if (/^ss:\/\//i.test(去空行内容)) {
+				let 已解析 = false;
+				try {
+					const SS匹配 = 去空行内容.match(/^ss:\/\/([^@]+)@([^?#]+)(?:\?[^#]*)?(?:#(.*))?$/i);
+					if (SS匹配 && atob(SS匹配[1]).endsWith(':00000000-0000-4000-8000-000000000000') && /example\.com/i.test(去空行内容)) {
+						优选IP.push(`${SS匹配[2]}#${decodeURIComponent(SS匹配[3] || SS匹配[2])}`);
+						已解析 = true;
+					}
+				} catch (error) { }
+				if (!已解析) 其他节点LINK += 行内容 + '\n';
+				continue;
+			}
 			if (行内容.includes('00000000-0000-4000-8000-000000000000') && 行内容.includes('example.com')) {
 				// 这是优选IP行，提取 域名:端口#备注
 				const 地址匹配 = 行内容.match(/:\/\/[^@]+@([^?]+)/);
@@ -7574,7 +7644,9 @@ function 获取代理默认端口(类型) {
 
 const SOCKS5账号Base64正则 = /^(?:[A-Z0-9+/]{4})*(?:[A-Z0-9+/]{2}==|[A-Z0-9+/]{3}=)?$/i, IPv6方括号正则 = /^\[.*\]$/;
 function 获取SOCKS5账号(address, 默认端口 = 80, 允许仅用户名 = false) {
-	address = String(address || '').trim().replace(/^(socks5|socks4a?|ss|http|https|turn|sstp):\/\//i, '').split('#')[0].trim();
+	address = String(address || '').trim().replace(/^(socks5|socks4a?|ss|http|https|turn|sstp):\/\//i, '').trim();
+	const 锚点索引 = address.indexOf('#');
+	if (锚点索引 !== -1 && 锚点索引 > address.lastIndexOf('@')) address = address.slice(0, 锚点索引).trim();
 	const firstAt = address.lastIndexOf("@");
 	if (firstAt !== -1) {
 		let auth = address.slice(0, firstAt).replaceAll("%3D", "=");
