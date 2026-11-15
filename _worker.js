@@ -1255,10 +1255,11 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 								} else if (!(await 写入远端(payload))) throw new Error('Remote socket is not ready');
 							} else {
 								const 首包bytes = GRPC首包缓存.byteLength ? 拼接字节数据(GRPC首包缓存, 数据转Uint8Array(payload)) : 数据转Uint8Array(payload);
-								if (判断是否是木马 === null) 判断是否是木马 = 首包bytes.byteLength >= 58 ? (首包bytes[56] === 0x0d && 首包bytes[57] === 0x0a) : null;
+								// 直接按密码哈希判定 Trojan，避免 56/57 字节启发式与 VMess 随机头冲突
+								const 木马解析结果 = 首包bytes.byteLength >= 58 ? 解析木马请求(首包bytes, yourUUID) : null;
+								判断是否是木马 = Boolean(木马解析结果 && !木马解析结果.hasError);
 								if (判断是否是木马) {
-									const 解析结果 = 解析木马请求(首包bytes, yourUUID);
-									if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid trojan request');
+									const 解析结果 = 木马解析结果;
 									GRPC首包缓存 = new Uint8Array(0);
 									const { port, hostname, rawClientData, isUDP } = 解析结果;
 									log(`[gRPC] 木马首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
@@ -2967,7 +2968,7 @@ function 构造VMess链接({ 地址, 端口, UUID, 备注, 传输协议 = 'ws', 
 		aid: '0',
 		scy: 加密方式,
 		net: 传输类型,
-		type: 传输类型 === 'grpc' ? gRPC模式 : (传输类型 === 'xhttp' ? 'stream-up' : 'none'),
+		type: 传输类型 === 'grpc' ? gRPC模式 : (传输类型 === 'xhttp' ? 'stream-one' : 'none'),
 		host: 主机名 || 地址,
 		path: 路径 || (传输类型 === 'grpc' ? '' : '/'),
 		tls: TLS ? 'tls' : '',
