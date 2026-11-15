@@ -1,4 +1,4 @@
-﻿const Version = '2026-11-15 18:00:00';
+﻿const Version = '2026-11-15 22:00:00';
 let config_JSON, 缓存SOCKS5白名单 = null, 调试日志打印 = false;
 let SOCKS5白名单 = ['*tapecontent.net', '*cloudatacdn.com', '*loadshare.org', '*cdn-centaurus.com', 'scholar.google.com'];
 const Pages静态页面 = 'https://edt-pages.github.io', EDT_版本号 = Number(String(Version).replace(/\D+/g, ''));
@@ -1006,6 +1006,7 @@ async function 读取叉HTTP首包(reader, token) {
 			hostname: VMess结果.首包.hostname,
 			port: VMess结果.首包.port,
 			isUDP: VMess结果.首包.isUDP,
+			isMux: VMess结果.首包.isMux,
 			rawData: null,
 			respHeader: null,
 			原始数据: null,
@@ -1028,6 +1029,7 @@ async function 读取叉HTTP首包(reader, token) {
 		hostname: 最终VMess结果.首包.hostname,
 		port: 最终VMess结果.首包.port,
 		isUDP: 最终VMess结果.首包.isUDP,
+		isMux: 最终VMess结果.首包.isMux,
 		rawData: null,
 		respHeader: null,
 		原始数据: null,
@@ -1072,6 +1074,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 	let 判断是否是木马 = null;
 	let VMess会话实例 = null;
 	let VMessUDP转发器 = null;
+	let VMessMux处理器 = null;
 	let GRPC首包缓存 = new Uint8Array(0);
 	let 当前写入Socket = null;
 	let 远端写入器 = null;
@@ -1245,10 +1248,11 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 								else await forwardataudp(payload, grpcBridge, null, request);
 								continue;
 							}
-							if (remoteConnWrapper.socket || remoteConnWrapper.connectingPromise || VMessUDP转发器) {
+							if (remoteConnWrapper.socket || remoteConnWrapper.connectingPromise || VMessUDP转发器 || VMessMux处理器) {
 								if (VMess会话实例) {
 									const VMess结果 = await VMess会话实例.输入(payload);
-									if (VMessUDP转发器) await VMessUDP转发器.处理(VMess结果.明文);
+									if (VMessMux处理器) await VMessMux处理器.处理(VMess结果.明文);
+									else if (VMessUDP转发器) await VMessUDP转发器.处理(VMess结果.明文);
 									else for (const 明文块 of VMess结果.明文) {
 										if (明文块.byteLength && !(await 写入远端(明文块))) throw new Error('Remote socket is not ready');
 									}
@@ -1307,10 +1311,16 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 										}
 										if (VMess解析结果.状态 !== 'ok') throw new Error(解析结果.message || VMess解析结果.原因 || 'Invalid request');
 										GRPC首包缓存 = new Uint8Array(0);
-										const { hostname, port, isUDP } = VMess解析结果.首包;
-										log(`[gRPC] VMess首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
+										const { hostname, port, isUDP, isMux } = VMess解析结果.首包;
+										log(`[gRPC] VMess首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'} | Mux: ${isMux ? '是' : '否'}`);
 										VMess会话实例 = VMess解析结果.会话;
 										const 首包明文 = VMess解析结果.明文?.length ? VMess拼接(...VMess解析结果.明文) : VMess空字节;
+										if (isMux) {
+											grpcBridge.send(await VMess会话实例.生成响应头());
+											VMessMux处理器 = 创建VMessMux处理器(VMess会话实例, (密文) => grpcBridge.send(密文), request, 反代上下文, yourUUID);
+											await VMessMux处理器.处理(首包明文.byteLength ? [首包明文] : []);
+											continue;
+										}
 										if (isUDP) {
 											if (port !== 53) throw new Error('UDP is not supported');
 											grpcBridge.send(await VMess会话实例.生成响应头());
@@ -1355,6 +1365,9 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 				转发失败 = true;
 				log(`[gRPC转发] 处理失败: ${err?.message || err}`);
 			} finally {
+				if (VMessMux处理器) {
+					try { await VMessMux处理器.关闭(false) } catch (e) { }
+				}
 				if (VMessUDP转发器) {
 					try {
 						const 结束块 = await VMess会话实例.结束下行();
@@ -1393,7 +1406,7 @@ function 是有效WS早期数据(bytes, token) {
 	return true;
 }
 
-function 解码WS早期数据(header, token) {
+function 解码WS早期数据(header) {
 	if (!header) return null;
 	if (header.length > WS早期数据最大头长度) throw new Error('early data is too large');
 
@@ -1419,7 +1432,13 @@ function 解码WS早期数据(header, token) {
 	}
 
 	if (bytes.byteLength > WS早期数据最大字节) throw new Error('early data is too large');
-	return 是有效WS早期数据(bytes, token) ? bytes : null;
+	return bytes;
+}
+
+async function 是有效VMessWS早期数据(bytes, token) {
+	if (!bytes?.byteLength || bytes.byteLength < 42) return false;
+	const 结果 = await 尝试解析VMess请求(bytes, token);
+	return 结果.状态 === 'ok' || 结果.状态 === 'need_more';
 }
 
 ///////////////////////////////////////////////////////////////////////WS传输数据///////////////////////////////////////////////
@@ -1768,9 +1787,13 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		}
 	};
 
-	let vmess会话 = null, vmessUDP转发器 = null, WS协议探测缓存 = new Uint8Array(0);
+	let vmess会话 = null, vmessUDP转发器 = null, vmessMux处理器 = null, WS协议探测缓存 = new Uint8Array(0);
 	const 处理VMessWS数据 = async (chunk) => {
 		const 结果 = await vmess会话.输入(chunk);
+		if (vmessMux处理器) {
+			await vmessMux处理器.处理(结果.明文);
+			return;
+		}
 		if (vmessUDP转发器) {
 			await vmessUDP转发器.处理(结果.明文);
 			return;
@@ -1784,6 +1807,11 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		vmess会话 = 解析结果.会话;
 		await WebSocket发送并等待(serverSock, await vmess会话.生成响应头());
 		const 首包明文 = 解析结果.明文?.length ? 拼接字节数据(...解析结果.明文) : new Uint8Array(0);
+		if (解析结果.首包.isMux) {
+			vmessMux处理器 = 创建VMessMux处理器(vmess会话, (密文) => WebSocket发送并等待(serverSock, 密文), request, 反代上下文, yourUUID);
+			await vmessMux处理器.处理(首包明文.byteLength ? [首包明文] : []);
+			return;
+		}
 		if (解析结果.首包.isUDP) {
 			if (解析结果.首包.port !== 53) throw new Error('UDP is not supported');
 			vmessUDP转发器 = 创建VMessUDP转发器(vmess会话, serverSock, request);
@@ -1922,6 +1950,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		} else {
 			log(`[WS转发] 处理失败: ${msg}`);
 		}
+		if (vmessMux处理器) void vmessMux处理器.关闭(false);
 		上行写入队列.清空();
 		释放远端写入器();
 		失效远端连接();
@@ -1960,6 +1989,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		追加WS显式传输任务(async () => {
 			if (WS显式传输失败) return;
 			await 上行写入队列.等待空();
+			if (vmessMux处理器) await vmessMux处理器.关闭(false);
 			释放远端写入器();
 			失效远端连接();
 			try { 木马UDP上下文.反代Socket?.close() } catch (e) { }
@@ -1980,8 +2010,11 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 	// SS 模式下禁用 sec-websocket-protocol early-data，避免把子协议值（如 "binary"）误当作 base64 数据注入首包导致 AEAD 解密失败。
 	if (!SS模式禁用EarlyData && earlyDataHeader) {
 		try {
-			const bytes = 解码WS早期数据(earlyDataHeader, yourUUID);
-			if (bytes?.byteLength) 入队WS显式传输(bytes.buffer);
+			const bytes = 解码WS早期数据(earlyDataHeader);
+			if (bytes?.byteLength) {
+				const 有效早期数据 = 是有效WS早期数据(bytes, yourUUID) || await 是有效VMessWS早期数据(bytes, yourUUID);
+				if (有效早期数据) 入队WS显式传输(bytes.buffer);
+			}
 		} catch (error) {
 			处理WS显式传输错误(error);
 		}
@@ -2671,8 +2704,7 @@ class VMess会话 {
 		const 填充长度 = 头字节[35] >> 4;
 		const 安全类型 = 头字节[35] & 0x0f;
 		const 命令 = 头字节[37];
-		if (命令 === 3) throw new Error('VMess mux 暂不支持');
-		if (命令 !== 1 && 命令 !== 2) throw new Error('VMess 命令无效');
+		if (命令 !== 1 && 命令 !== 2 && 命令 !== 3) throw new Error('VMess 命令无效');
 		if (![VMess常量.安全AES128GCM, VMess常量.安全CHACHA20, VMess常量.安全NONE].includes(安全类型)) throw new Error('VMess 加密方式不支持');
 		const 端口 = VMess读U16(头字节, 38);
 		const 地址类型 = 头字节[40];
@@ -2698,7 +2730,7 @@ class VMess会话 {
 
 		this.缓冲 = 数据.subarray(总长度);
 		this.头 = {
-			协议: 'vmess', hostname, port: 端口, isUDP: 命令 === 2,
+			协议: 'vmess', hostname, port: 端口, isUDP: 命令 === 2, 命令, isMux: 命令 === 3,
 			请求体IV, 请求体密钥, 响应头, 选项, 安全类型,
 			版本: 头字节[0]
 		};
@@ -2875,9 +2907,10 @@ async function 尝试解析VMess请求(字节, uuid) {
 
 async function 处理VMess叉HTTP连接(首包, reader, request, yourUUID, 反代上下文, responseHeaders) {
 	const 会话 = 首包.会话;
+	const 首包明文 = 首包.明文?.length ? VMess拼接(...首包.明文) : VMess空字节;
+	if (首包.isMux) return 处理VMessMux叉HTTP连接(会话, 首包明文, reader, request, yourUUID, 反代上下文, responseHeaders);
 	const remoteConnWrapper = { socket: null, connectingPromise: null, retryConnect: null, downlinkDrain: Promise.resolve() };
 	const 占位WS = { readyState: WebSocket.OPEN };
-	const 首包明文 = 首包.明文?.length ? VMess拼接(...首包.明文) : VMess空字节;
 	let socket;
 	try {
 		socket = await forwardataTCP(首包.hostname, 首包.port, 首包明文, 占位WS, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, true);
@@ -2943,6 +2976,33 @@ async function 处理VMess叉HTTP连接(首包, reader, request, yourUUID, 反�
 		try { socket.close() } catch (e) { }
 	});
 
+	return new Response(响应流.readable, { status: 200, headers: responseHeaders });
+}
+
+function 处理VMessMux叉HTTP连接(会话, 首包明文, reader, request, yourUUID, 反代上下文, responseHeaders) {
+	const 响应流 = typeof IdentityTransformStream !== 'undefined' ? new IdentityTransformStream() : new TransformStream();
+	const 下行写入器 = 响应流.writable.getWriter();
+	const mux处理器 = 创建VMessMux处理器(会话, (密文) => 下行写入器.write(密文), request, 反代上下文, yourUUID);
+	void (async () => {
+		try {
+			await 下行写入器.write(await 会话.生成响应头());
+			await mux处理器.处理(首包明文.byteLength ? [首包明文] : []);
+			while (true) {
+				const { done, value } = await reader.read();
+				if (done) break;
+				const 结果 = await 会话.输入(数据转Uint8Array(value));
+				await mux处理器.处理(结果.明文);
+			}
+			await mux处理器.关闭(true);
+		} catch (err) {
+			log(`[VMess-叉HTTP] mux 处理结束: ${err?.message || err}`);
+		} finally {
+			try { await mux处理器.关闭(false) } catch (e) { }
+			try { await 下行写入器.close() } catch (e) { }
+			try { 下行写入器.releaseLock() } catch (e) { }
+			try { reader.releaseLock() } catch (e) { }
+		}
+	})();
 	return new Response(响应流.readable, { status: 200, headers: responseHeaders });
 }
 
@@ -3491,6 +3551,370 @@ function 创建VMessUDP转发器(会话, 发送桥, request) {
 			}
 		}
 	};
+}
+
+// VMess Mux.Cool：明文流按帧复用，每个 session 独立拨号并按需封装下行帧
+const VMessMux状态 = { 新建: 1, 保持: 2, 结束: 3, 保活: 4 };
+const VMessMux选项 = { 数据: 1, 错误: 2 };
+
+function IPv6文本转字节(文本) {
+	let 原始 = String(文本 || '').replace(/^\[|\]$/g, '');
+	const 百分号位置 = 原始.indexOf('%');
+	if (百分号位置 !== -1) 原始 = 原始.slice(0, 百分号位置);
+	const 双冒号位置 = 原始.indexOf('::');
+	const 整理段 = (列表) => {
+		const 结果 = [];
+		for (const 段 of 列表) {
+			if (!段) return null;
+			if (段.includes('.')) {
+				const v4 = 段.split('.').map(Number);
+				if (v4.length !== 4 || v4.some(n => !Number.isInteger(n) || n < 0 || n > 255)) return null;
+				结果.push(((v4[0] << 8) | v4[1]).toString(16), ((v4[2] << 8) | v4[3]).toString(16));
+			} else 结果.push(段);
+		}
+		return 结果;
+	};
+	const 头段 = 整理段(双冒号位置 === -1 ? 原始.split(':') : (原始.slice(0, 双冒号位置) ? 原始.slice(0, 双冒号位置).split(':') : []));
+	const 尾段 = 整理段(双冒号位置 === -1 ? [] : (原始.slice(双冒号位置 + 2) ? 原始.slice(双冒号位置 + 2).split(':') : []));
+	if (!头段 || !尾段) return null;
+	const 段列表 = 双冒号位置 === -1 ? 头段 : [...头段, ...new Array(Math.max(0, 8 - 头段.length - 尾段.length)).fill('0'), ...尾段];
+	if (段列表.length !== 8) return null;
+	const 字节 = new Uint8Array(16);
+	for (let i = 0; i < 8; i++) {
+		if (!/^[0-9a-fA-F]{1,4}$/.test(段列表[i])) return null;
+		const 值 = parseInt(段列表[i], 16);
+		字节[i * 2] = 值 >>> 8;
+		字节[i * 2 + 1] = 值 & 0xff;
+	}
+	return 字节;
+}
+
+function 编码VMessMux地址(主机) {
+	const 文本 = stripIPv6Brackets(String(主机 || ''));
+	if (isIPv4(文本)) return new Uint8Array([1, ...文本.split('.').map(Number)]);
+	if (文本.includes(':')) {
+		const ipv6 = IPv6文本转字节(文本);
+		if (!ipv6) return null;
+		const 结果 = new Uint8Array(17);
+		结果[0] = 3;
+		结果.set(ipv6, 1);
+		return 结果;
+	}
+	const 域名 = VMess文本编码器.encode(文本);
+	if (!域名.byteLength || 域名.byteLength > 255) return null;
+	const 结果 = new Uint8Array(2 + 域名.byteLength);
+	结果[0] = 2;
+	结果[1] = 域名.byteLength;
+	结果.set(域名, 2);
+	return 结果;
+}
+
+function 构造VMessMux帧(sessionID, status, option, 数据 = null, 目标 = null) {
+	const 地址 = 目标 ? 编码VMessMux地址(目标.hostname) : null;
+	const 元数据长度 = 4 + (地址 ? 3 + 地址.byteLength : 0);
+	const 数据块 = 数据?.byteLength ? 数据 : null;
+	const 帧 = new Uint8Array(2 + 元数据长度 + (数据块 ? 2 + 数据块.byteLength : 0));
+	帧[0] = (元数据长度 >>> 8) & 0xff;
+	帧[1] = 元数据长度 & 0xff;
+	帧[2] = (sessionID >>> 8) & 0xff;
+	帧[3] = sessionID & 0xff;
+	帧[4] = status;
+	帧[5] = option;
+	let 偏移 = 6;
+	if (地址) {
+		帧[偏移++] = 目标.network === 2 ? 2 : 1;
+		帧[偏移++] = (目标.port >>> 8) & 0xff;
+		帧[偏移++] = 目标.port & 0xff;
+		帧.set(地址, 偏移);
+		偏移 += 地址.byteLength;
+	}
+	if (数据块) {
+		帧[偏移++] = (数据块.byteLength >>> 8) & 0xff;
+		帧[偏移++] = 数据块.byteLength & 0xff;
+		帧.set(数据块, 偏移);
+	}
+	return 帧;
+}
+
+function 创建VMessMux处理器(会话, 发送密文, request, 反代上下文, yourUUID) {
+	const 会话表 = new Map();
+	const 状态 = { 缓存: VMess空字节, 已关闭: false, 发送链: Promise.resolve(), 发送失败: false };
+
+	const 追加发送任务 = (任务) => {
+		if (状态.发送失败) return 状态.发送链;
+		状态.发送链 = 状态.发送链.then(任务).catch((err) => {
+			if (!状态.发送失败) {
+				状态.发送失败 = true;
+				log(`[VMess-Mux] 下行发送失败: ${err?.message || err}`);
+			}
+		});
+		return 状态.发送链;
+	};
+
+	const 串行发送明文 = (明文) => {
+		if (状态.已关闭) return 状态.发送链;
+		const 数据 = 数据转Uint8Array(明文);
+		if (!数据.byteLength) return 状态.发送链;
+		return 追加发送任务(async () => {
+			if (状态.已关闭) return;
+			const 密文 = await 会话.加密下行(数据);
+			if (密文.byteLength) await 发送密文(密文);
+		});
+	};
+
+	const 发送帧 = (id, status, option = 0, 数据 = null, 目标 = null) => {
+		return 串行发送明文(构造VMessMux帧(id, status, option, 数据, 目标));
+	};
+
+	const 发送数据帧 = async (id, 数据) => {
+		for (let 偏移 = 0; 偏移 < 数据.byteLength; 偏移 += 8 * 1024) {
+			if (状态.已关闭) return;
+			await 发送帧(id, VMessMux状态.保持, VMessMux选项.数据, 数据.subarray(偏移, 偏移 + 8 * 1024));
+		}
+	};
+
+	const 移除会话 = (会话对象) => {
+		if (会话对象.已结束) return;
+		会话对象.已结束 = true;
+		会话表.delete(会话对象.id);
+		const writer = 会话对象.writer;
+		会话对象.writer = null;
+		if (writer) {
+			try {
+				const 结果 = writer.close();
+				if (结果 && typeof 结果.catch === 'function') 结果.catch(() => { });
+			} catch (e) { }
+		}
+		try { 会话对象.socket?.close?.() } catch (e) { }
+	};
+
+	const 结束会话 = (会话对象, 有错误 = false) => {
+		if (会话对象.已结束) return;
+		移除会话(会话对象);
+		void 发送帧(会话对象.id, VMessMux状态.结束, 有错误 ? VMessMux选项.错误 : 0);
+	};
+
+	const 写入会话 = (会话对象, 数据) => {
+		if (会话对象.已结束 || !数据?.byteLength) return;
+		if (!会话对象.writer) {
+			会话对象.待写.push(数据.slice());
+			return;
+		}
+		会话对象.写链 = 会话对象.写链.then(async () => {
+			if (会话对象.已结束 || !会话对象.writer) return;
+			await 会话对象.writer.write(数据);
+		}).catch((err) => {
+			log(`[VMess-Mux] 会话 ${会话对象.id} 上行写入失败: ${err?.message || err}`);
+			结束会话(会话对象, true);
+		});
+	};
+
+	const 建立TCPSession = (id, 目标, 首包数据) => {
+		if (会话表.has(id)) return;
+		const 会话对象 = {
+			id, 目标, 类型: 'tcp', socket: null, writer: null, 已结束: false,
+			待写: [], 写链: Promise.resolve()
+		};
+		会话表.set(id, 会话对象);
+		void (async () => {
+			let socket = null;
+			try {
+				socket = await forwardataTCP(目标.hostname, 目标.port, 首包数据 || VMess空字节, { readyState: WebSocket.OPEN }, null,
+					{ socket: null, connectingPromise: null, retryConnect: null, downlinkDrain: Promise.resolve() },
+					yourUUID, request, 反代上下文, false, null, true);
+			} catch (err) {
+				log(`[VMess-Mux] ${目标.hostname}:${目标.port} 连接失败: ${err?.message || err}`);
+			}
+			if (!socket) {
+				if (!会话对象.已结束) 结束会话(会话对象, true);
+				return;
+			}
+			if (会话对象.已结束 || 状态.已关闭) {
+				try { socket.close() } catch (e) { }
+				return;
+			}
+			会话对象.socket = socket;
+			会话对象.writer = socket.writable.getWriter();
+			void (async () => {
+				const 读取器 = socket.readable.getReader();
+				try {
+					while (!会话对象.已结束 && !状态.已关闭) {
+						const { done, value } = await 读取器.read();
+						if (done) break;
+						await 发送数据帧(id, 数据转Uint8Array(value));
+					}
+					结束会话(会话对象, false);
+				} catch (err) {
+					if (!会话对象.已结束 && !状态.已关闭) {
+						log(`[VMess-Mux] 会话 ${id} 下行结束: ${err?.message || err}`);
+						结束会话(会话对象, true);
+					}
+				} finally {
+					try { 读取器.releaseLock() } catch (e) { }
+				}
+			})();
+			const 待写列表 = 会话对象.待写.splice(0);
+			for (const 待写数据 of 待写列表) 写入会话(会话对象, 待写数据);
+		})();
+	};
+
+	const 转发UDP报文 = (会话对象, 报文) => {
+		const 查询 = new Uint8Array(2 + 报文.byteLength);
+		查询[0] = (报文.byteLength >>> 8) & 0xff;
+		查询[1] = 报文.byteLength & 0xff;
+		查询.set(报文, 2);
+		const 响应缓存 = { 数据: VMess空字节 };
+		const 发送桥 = {
+			readyState: WebSocket.OPEN,
+			send: (payload) => 串行发送明文(payload)
+		};
+		void forwardataudp(查询, 发送桥, null, request, async (chunk) => {
+			const 当前响应 = 数据转Uint8Array(chunk);
+			const 输入 = 响应缓存.数据.byteLength ? 拼接字节数据(响应缓存.数据, 当前响应) : 当前响应;
+			const 帧列表 = [];
+			let 游标 = 0;
+			while (游标 + 2 <= 输入.byteLength) {
+				const 长度 = (输入[游标] << 8) | 输入[游标 + 1];
+				if (游标 + 2 + 长度 > 输入.byteLength) break;
+				const DNS响应 = 输入.subarray(游标 + 2, 游标 + 2 + 长度);
+				游标 += 2 + 长度;
+				if (!DNS响应.byteLength) continue;
+				const 报文封装 = new Uint8Array(2 + DNS响应.byteLength);
+				报文封装[0] = (DNS响应.byteLength >>> 8) & 0xff;
+				报文封装[1] = DNS响应.byteLength & 0xff;
+				报文封装.set(DNS响应, 2);
+				帧列表.push(构造VMessMux帧(会话对象.id, VMessMux状态.保持, VMessMux选项.数据, 报文封装, 会话对象.目标));
+			}
+			响应缓存.数据 = 输入.slice(游标);
+			return 帧列表;
+		}).catch((err) => log(`[VMess-Mux] UDP 转发失败: ${err?.message || err}`));
+	};
+
+	const 处理UDP会话数据 = (会话对象, 数据) => {
+		if (会话对象.已结束 || 状态.已关闭 || !数据?.byteLength) return;
+		let 游标 = 0;
+		while (游标 + 2 <= 数据.byteLength) {
+			const 长度 = (数据[游标] << 8) | 数据[游标 + 1];
+			if (长度 === 0) { 游标 += 2; continue; }
+			if (游标 + 2 + 长度 > 数据.byteLength) break;
+			const 报文 = 数据.slice(游标 + 2, 游标 + 2 + 长度);
+			游标 += 2 + 长度;
+			转发UDP报文(会话对象, 报文);
+		}
+		if (游标 === 0 && 数据.byteLength) 转发UDP报文(会话对象, 数据.slice());
+	};
+
+	const 建立UDPSession = (id, 目标, 首包数据) => {
+		if (会话表.has(id)) return;
+		if (目标.port !== 53) {
+			void 发送帧(id, VMessMux状态.结束, VMessMux选项.错误);
+			return;
+		}
+		const 会话对象 = { id, 目标, 类型: 'udp', 已结束: false };
+		会话表.set(id, 会话对象);
+		if (首包数据?.byteLength) 处理UDP会话数据(会话对象, 首包数据);
+	};
+
+	const 读取帧地址 = (缓存, 元数据结束) => {
+		let 游标 = 9;
+		if (游标 >= 元数据结束) return null;
+		const 地址类型 = 缓存[游标++];
+		if (地址类型 === 1) {
+			if (游标 + 4 > 元数据结束) return null;
+			return `${缓存[游标]}.${缓存[游标 + 1]}.${缓存[游标 + 2]}.${缓存[游标 + 3]}`;
+		}
+		if (地址类型 === 2) {
+			if (游标 + 1 > 元数据结束) return null;
+			const 域名长度 = 缓存[游标++];
+			if (游标 + 域名长度 > 元数据结束) return null;
+			return VMess文本解码器.decode(缓存.subarray(游标, 游标 + 域名长度));
+		}
+		if (地址类型 === 3) {
+			if (游标 + 16 > 元数据结束) return null;
+			const 段 = [];
+			for (let i = 0; i < 8; i++) 段.push(((缓存[游标 + i * 2] << 8) | 缓存[游标 + i * 2 + 1]).toString(16));
+			return 段.join(':');
+		}
+		return null;
+	};
+
+	const 处理帧 = (id, status, option, 目标, 数据) => {
+		if (status === VMessMux状态.新建) {
+			if (!目标 || 会话表.has(id)) return;
+			if (目标.network === 2) 建立UDPSession(id, 目标, 数据);
+			else 建立TCPSession(id, 目标, 数据);
+			return;
+		}
+		if (status === VMessMux状态.保持) {
+			const 会话对象 = 会话表.get(id);
+			if (!会话对象) {
+				if (数据?.byteLength) void 发送帧(id, VMessMux状态.结束, 0);
+				return;
+			}
+			if (!数据?.byteLength) return;
+			if (会话对象.类型 === 'udp') {
+				if (目标) 会话对象.目标 = 目标;
+				处理UDP会话数据(会话对象, 数据);
+			} else 写入会话(会话对象, 数据);
+			return;
+		}
+		if (status === VMessMux状态.结束) {
+			const 会话对象 = 会话表.get(id);
+			if (会话对象) 结束会话(会话对象, false);
+		}
+	};
+
+	const 处理 = async (明文块列表) => {
+		for (const 明文块 of 明文块列表 || []) {
+			if (!明文块?.byteLength || 状态.已关闭) continue;
+			状态.缓存 = 状态.缓存.byteLength ? 拼接字节数据(状态.缓存, 明文块) : 明文块;
+			while (状态.缓存.byteLength >= 2) {
+				const 缓存 = 状态.缓存;
+				const 元数据长度 = (缓存[0] << 8) | 缓存[1];
+				if (元数据长度 < 4 || 元数据长度 > 512) throw new Error('VMess mux 元数据长度异常');
+				const 元数据结束 = 2 + 元数据长度;
+				if (缓存.byteLength < 元数据结束) break;
+				const id = (缓存[2] << 8) | 缓存[3];
+				const status = 缓存[4], option = 缓存[5];
+				let 目标 = null;
+				if (status === VMessMux状态.新建) {
+					const 网络 = 缓存[6];
+					const 端口 = (缓存[7] << 8) | 缓存[8];
+					const 主机 = 读取帧地址(缓存, 元数据结束);
+					if (主机) 目标 = { hostname: 主机, port: 端口, network: 网络 };
+				} else if (status === VMessMux状态.保持 && 元数据长度 > 4 && 缓存[6] === 2) {
+					const 端口 = (缓存[7] << 8) | 缓存[8];
+					const 主机 = 读取帧地址(缓存, 元数据结束);
+					if (主机) 目标 = { hostname: 主机, port: 端口, network: 2 };
+				}
+				let 游标 = 元数据结束;
+				let 数据 = null;
+				if (option & VMessMux选项.数据) {
+					if (缓存.byteLength < 游标 + 2) break;
+					const 数据长度 = (缓存[游标] << 8) | 缓存[游标 + 1];
+					if (缓存.byteLength < 游标 + 2 + 数据长度) break;
+					数据 = 缓存.subarray(游标 + 2, 游标 + 2 + 数据长度);
+					游标 += 2 + 数据长度;
+				}
+				状态.缓存 = 缓存.slice(游标);
+				await 处理帧(id, status, option, 目标, 数据);
+			}
+		}
+	};
+
+	const 关闭 = async (通知下行 = true) => {
+		if (状态.已关闭) return;
+		状态.已关闭 = true;
+		for (const 会话对象 of Array.from(会话表.values())) 移除会话(会话对象);
+		会话表.clear();
+		if (!通知下行) return;
+		await 追加发送任务(async () => {
+			const 结束块 = await 会话.结束下行();
+			if (结束块.byteLength) await 发送密文(结束块);
+		});
+	};
+
+	return { 处理, 关闭 };
 }
 
 async function forwardataudp(udpChunk, webSocket, respHeader, request, 响应封装器 = null) {
@@ -6669,7 +7093,7 @@ pre{margin:0;padding:10px;background:#0d1117;border:1px solid var(--line);border
 			<button onclick="load()">重新读取</button>
 			<span class="muted" id="saveState"></span>
 		</div>
-		<div class="note">切换后保存即写入 KV，客户端需重新拉取订阅或重新导入节点链接。VMess 支持 WS、XHTTP 与 gRPC（gun/multi）。</div>
+		<div class="note">切换后保存即写入 KV，客户端需重新拉取订阅或重新导入节点链接。VMess 支持 WS、XHTTP、gRPC（gun/multi）与 Mux.Cool 多路复用。</div>
 	</div>
 	<div class="panel">
 		<h2>节点链接</h2>
@@ -6697,6 +7121,7 @@ pre{margin:0;padding:10px;background:#0d1117;border:1px solid var(--line);border
 			<tr><td>优选IP / CNAME</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td></tr>
 			<tr><td>链式代理（备注 $socks5:// 等）</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td></tr>
 			<tr><td>gRPC 传输</td><td><span class="tag">支持</span></td><td><span class="tag">支持</span></td><td><span class="tag">支持（gun/multi）</span></td><td><span class="tag off">不支持</span></td></tr>
+			<tr><td>Mux.Cool 多路复用</td><td><span class="tag off">不支持</span></td><td><span class="tag off">不支持</span></td><td><span class="tag">支持（TCP/DNS）</span></td><td><span class="tag off">不支持</span></td></tr>
 		</table>
 		<div class="note">四种入站协议都走同一套 forwardataTCP 出站：ProxyIP、优选IP、以及 SOCKS5/SOCKS4/SS/HTTP/HTTPS/TURN/SSTP 链式代理均对它们生效；IP 是否可用取决于 IP 本身与端口，与协议类型无关。</div>
 	</div>
