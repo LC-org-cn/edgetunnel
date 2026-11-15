@@ -758,6 +758,24 @@ function 处理叉HTTPUDP请求(首包, reader, request, 反代上下文, respon
 			};
 			let 转发失败 = false;
 			try {
+				if (首包.协议 === 'vmess' && 首包.会话) {
+					if (Number(首包.port) !== 53) throw new Error('UDP is not supported');
+					const VMessUDP转发器 = 创建VMessUDP转发器(首包.会话, 叉桥, request);
+					叉桥.send(await 首包.会话.生成响应头());
+					await VMessUDP转发器.处理(首包.明文 || []);
+					while (true) {
+						const { done, value } = await reader.read();
+						if (done) break;
+						if (!value?.byteLength) continue;
+						const 结果 = await 首包.会话.输入(数据转Uint8Array(value));
+						await VMessUDP转发器.处理(结果.明文);
+					}
+					const 结束块 = await 首包.会话.结束下行();
+					if (结束块.byteLength) 叉桥.send(结束块);
+					closeSocketQuietly(叉桥);
+					try { reader.releaseLock() } catch (e) { }
+					return;
+				}
 				if (首包.协议 === 'trojan') {
 					木马UDP上下文.目标主机 = 首包.hostname;
 					木马UDP上下文.目标端口 = 首包.port;
@@ -1029,6 +1047,8 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 	const 木马UDP上下文 = { 缓存: new Uint8Array(0), 反代地址: 反代上下文.木马反代地址 };
 	let 判断是否是木马 = null;
 	let VMess会话实例 = null;
+	let VMessUDP转发器 = null;
+	let GRPC首包缓存 = new Uint8Array(0);
 	let 当前写入Socket = null;
 	let 远端写入器 = null;
 	let GRPC上行写入队列 = null;
@@ -1215,19 +1235,21 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 							else await forwardataudp(payload, grpcBridge, null, request);
 							continue;
 						}
-						if (remoteConnWrapper.socket || remoteConnWrapper.connectingPromise) {
+						if (remoteConnWrapper.socket || remoteConnWrapper.connectingPromise || VMessUDP转发器) {
 							if (VMess会话实例) {
 								const VMess结果 = await VMess会话实例.输入(payload);
-								for (const 明文块 of VMess结果.明文) {
+								if (VMessUDP转发器) await VMessUDP转发器.处理(VMess结果.明文);
+								else for (const 明文块 of VMess结果.明文) {
 									if (明文块.byteLength && !(await 写入远端(明文块))) throw new Error('Remote socket is not ready');
 								}
 							} else if (!(await 写入远端(payload))) throw new Error('Remote socket is not ready');
 						} else {
-							const 首包bytes = 数据转Uint8Array(payload);
-							if (判断是否是木马 === null) 判断是否是木马 = 首包bytes.byteLength >= 58 && 首包bytes[56] === 0x0d && 首包bytes[57] === 0x0a;
+							const 首包bytes = GRPC首包缓存.byteLength ? 拼接字节数据(GRPC首包缓存, 数据转Uint8Array(payload)) : 数据转Uint8Array(payload);
+							if (判断是否是木马 === null) 判断是否是木马 = 首包bytes.byteLength >= 58 ? (首包bytes[56] === 0x0d && 首包bytes[57] === 0x0a) : null;
 							if (判断是否是木马) {
 								const 解析结果 = 解析木马请求(首包bytes, yourUUID);
 								if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid trojan request');
+								GRPC首包缓存 = new Uint8Array(0);
 								const { port, hostname, rawClientData, isUDP } = 解析结果;
 								log(`[gRPC] 木马首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
 								if (isSpeedTestSite(hostname) && 反代上下文.代理类型 === null) {
@@ -1247,6 +1269,7 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 								判断是否是木马 = false;
 								const 解析结果 = 解析魏烈思请求(首包bytes, yourUUID);
 								if (!解析结果?.hasError) {
+									GRPC首包缓存 = new Uint8Array(0);
 									const { port, hostname, version, isUDP, rawClientData } = 解析结果;
 									log(`[gRPC] 魏烈思首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
 									const respHeader = new Uint8Array([version, 0]);
@@ -1267,12 +1290,23 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 									else await forwardataTCP(hostname, port, rawData, grpcBridge, null, remoteConnWrapper, yourUUID, request, 反代上下文);
 								} else {
 									const VMess解析结果 = await 尝试解析VMess请求(首包bytes, yourUUID);
+									if (VMess解析结果.状态 === 'need_more' && 首包bytes.byteLength < 4096) {
+										GRPC首包缓存 = 首包bytes;
+										continue;
+									}
 									if (VMess解析结果.状态 !== 'ok') throw new Error(解析结果.message || VMess解析结果.原因 || 'Invalid request');
+									GRPC首包缓存 = new Uint8Array(0);
 									const { hostname, port, isUDP } = VMess解析结果.首包;
 									log(`[gRPC] VMess首包: ${hostname}:${port} | UDP: ${isUDP ? '是' : '否'}`);
-									if (isUDP) throw new Error('UDP is not supported');
 									VMess会话实例 = VMess解析结果.会话;
 									const 首包明文 = VMess解析结果.明文?.length ? VMess拼接(...VMess解析结果.明文) : VMess空字节;
+									if (isUDP) {
+										if (port !== 53) throw new Error('UDP is not supported');
+										grpcBridge.send(await VMess会话实例.生成响应头());
+										VMessUDP转发器 = 创建VMessUDP转发器(VMess会话实例, grpcBridge, request);
+										await VMessUDP转发器.处理(首包明文.byteLength ? [首包明文] : []);
+										continue;
+									}
 									const 远端socket = await forwardataTCP(hostname, port, 首包明文, { readyState: WebSocket.OPEN }, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, true);
 									if (!远端socket) throw new Error('VMess remote socket unavailable');
 									grpcBridge.send(await VMess会话实例.生成响应头());
@@ -1309,6 +1343,12 @@ async function 处理gRPC请求(request, yourUUID, 反代上下文 = {}) {
 				转发失败 = true;
 				log(`[gRPC转发] 处理失败: ${err?.message || err}`);
 			} finally {
+				if (VMessUDP转发器) {
+					try {
+						const 结束块 = await VMess会话实例.结束下行();
+						if (结束块.byteLength) grpcBridge.send(结束块);
+					} catch (e) { }
+				}
 				const 保持木马UDP反代下行 = !转发失败 && isDnsQuery && 判断是否是木马 && 木马UDP上下文.反代地址 && 木马UDP上下文.反代Socket;
 				if (保持木马UDP反代下行) {
 					上行写入队列.清空();
@@ -1716,9 +1756,13 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		}
 	};
 
-	let vmess会话 = null;
+	let vmess会话 = null, vmessUDP转发器 = null, WS协议探测缓存 = new Uint8Array(0);
 	const 处理VMessWS数据 = async (chunk) => {
 		const 结果 = await vmess会话.输入(chunk);
+		if (vmessUDP转发器) {
+			await vmessUDP转发器.处理(结果.明文);
+			return;
+		}
 		for (const 明文块 of 结果.明文) {
 			if (明文块.byteLength) await 写入远端(明文块);
 		}
@@ -1728,6 +1772,12 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		vmess会话 = 解析结果.会话;
 		await WebSocket发送并等待(serverSock, await vmess会话.生成响应头());
 		const 首包明文 = 解析结果.明文?.length ? 拼接字节数据(...解析结果.明文) : new Uint8Array(0);
+		if (解析结果.首包.isUDP) {
+			if (解析结果.首包.port !== 53) throw new Error('UDP is not supported');
+			vmessUDP转发器 = 创建VMessUDP转发器(vmess会话, serverSock, request);
+			await vmessUDP转发器.处理(首包明文.byteLength ? [首包明文] : []);
+			return;
+		}
 		const socket = await forwardataTCP(解析结果.首包.hostname, 解析结果.首包.port, 首包明文, serverSock, null, remoteConnWrapper, yourUUID, request, 反代上下文, false, null, true);
 		if (!socket) throw new Error('VMess 远端连接建立失败');
 		(async () => {
@@ -1771,17 +1821,29 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		if (await 写入远端(chunk)) return;
 
 		if (判断协议类型 === null) {
-			当前块字节 = 数据转Uint8Array(chunk);
-			if (url.searchParams.get('enc')) 判断协议类型 = 'ss';
+			当前块字节 = WS协议探测缓存.byteLength ? 拼接字节数据(WS协议探测缓存, 数据转Uint8Array(chunk)) : 数据转Uint8Array(chunk);
+			if (url.searchParams.get('enc')) {
+				WS协议探测缓存 = new Uint8Array(0);
+				判断协议类型 = 'ss';
+			}
 			else {
 				const VMess尝试 = await 尝试解析VMess请求(当前块字节, yourUUID);
 				if (VMess尝试.状态 === 'ok') {
+					WS协议探测缓存 = new Uint8Array(0);
 					判断协议类型 = 'vmess';
 					判断是否是木马 = false;
 					log(`[WS转发] 协议类型: vmess | 来自: ${url.host} | UA: ${request.headers.get('user-agent') || '未知'}`);
 					await 初始化VMessWS连接(VMess尝试);
 					return;
 				}
+				if (VMess尝试.状态 === 'need_more' && 当前块字节.byteLength < 4096) {
+					// 可能是被拆分的 VMess 头；若已能解析为 VLESS 则直接按 VLESS 处理，避免等待后续帧造成卡顿
+					if (解析魏烈思请求(当前块字节, yourUUID)?.hasError) {
+						WS协议探测缓存 = 当前块字节;
+						return;
+					}
+				}
+				WS协议探测缓存 = new Uint8Array(0);
 				const bytes = 当前块字节;
 				判断协议类型 = bytes.byteLength >= 58 && bytes[56] === 0x0d && bytes[57] === 0x0a ? '木马' : '魏烈思';
 			}
@@ -1795,7 +1857,7 @@ async function 处理WS请求(request, yourUUID, url, 反代上下文 = {}) {
 		}
 		if (await 写入远端(chunk)) return;
 		if (判断协议类型 === '木马') {
-			const 解析结果 = 解析木马请求(chunk, yourUUID);
+			const 解析结果 = 解析木马请求(当前块字节 || chunk, yourUUID);
 			if (解析结果?.hasError) throw new Error(解析结果.message || 'Invalid trojan request');
 			const { port, hostname, rawClientData, isUDP } = 解析结果;
 			if (isSpeedTestSite(hostname) && 反代上下文.代理类型 === null) {
@@ -3360,6 +3422,60 @@ async function forwardataTCP(host, portNum, rawData, ws, respHeader, remoteConnW
 			if (仅建立连接) return remoteConnWrapper.socket;
 		}
 	}
+}
+
+// VMess UDP（仅 DNS）：上行按 2 字节长度拆包，下行按 VMess UDP 报文封装并加密
+function 创建VMessUDP转发器(会话, 发送桥, request) {
+	const 查询缓存 = { 数据: new Uint8Array(0) };
+
+	const 转发DNS查询 = async (查询) => {
+		if (!查询.byteLength) return;
+		let tcpDNS查询 = 查询;
+		if (查询.byteLength < 2 || ((查询[0] << 8) | 查询[1]) !== 查询.byteLength - 2) {
+			tcpDNS查询 = new Uint8Array(查询.byteLength + 2);
+			tcpDNS查询[0] = (查询.byteLength >>> 8) & 0xff;
+			tcpDNS查询[1] = 查询.byteLength & 0xff;
+			tcpDNS查询.set(查询, 2);
+		}
+		const 响应缓存 = { 数据: new Uint8Array(0) };
+		await forwardataudp(tcpDNS查询, 发送桥, null, request, async (chunk) => {
+			const 当前响应 = 数据转Uint8Array(chunk);
+			const 输入 = 响应缓存.数据.byteLength ? 拼接字节数据(响应缓存.数据, 当前响应) : 当前响应;
+			const 片段列表 = [];
+			let 游标 = 0;
+			while (游标 + 2 <= 输入.byteLength) {
+				const 长度 = (输入[游标] << 8) | 输入[游标 + 1];
+				if (游标 + 2 + 长度 > 输入.byteLength) break;
+				const DNS响应 = 输入.subarray(游标 + 2, 游标 + 2 + 长度);
+				游标 += 2 + 长度;
+				if (!DNS响应.byteLength) continue;
+				const 报文 = new Uint8Array(2 + DNS响应.byteLength);
+				报文[0] = (DNS响应.byteLength >>> 8) & 0xff;
+				报文[1] = DNS响应.byteLength & 0xff;
+				报文.set(DNS响应, 2);
+				const 密文 = await 会话.加密下行(报文);
+				if (密文.byteLength) 片段列表.push(密文);
+			}
+			响应缓存.数据 = 输入.slice(游标);
+			return 片段列表;
+		});
+	};
+
+	return {
+		async 处理(明文块列表) {
+			for (const 明文块 of 明文块列表 || []) {
+				if (!明文块?.byteLength) continue;
+				查询缓存.数据 = 查询缓存.数据.byteLength ? 拼接字节数据(查询缓存.数据, 明文块) : 明文块;
+				while (查询缓存.数据.byteLength >= 2) {
+					const 长度 = (查询缓存.数据[0] << 8) | 查询缓存.数据[1];
+					if (查询缓存.数据.byteLength < 2 + 长度) break;
+					const 查询 = 查询缓存.数据.slice(2, 2 + 长度);
+					查询缓存.数据 = 查询缓存.数据.slice(2 + 长度);
+					await 转发DNS查询(查询);
+				}
+			}
+		}
+	};
 }
 
 async function forwardataudp(udpChunk, webSocket, respHeader, request, 响应封装器 = null) {
